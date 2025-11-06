@@ -1,0 +1,16 @@
+[
+    {
+        "name": "ASP.NET_SessionId",
+        "value": "ohkmnldiqhrkiup0dhpppz1a",
+        "domain": "milkywayapp.xyz",
+        "path": "/",
+        "expires": -1,
+        "size": 41,
+        "httpOnly": true,
+        "secure": false,
+        "session": true,
+        "priority": "Medium",
+        "sameParty": false,
+        "sourceScheme": "Secure"
+    }
+]

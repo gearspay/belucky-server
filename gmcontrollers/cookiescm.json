@@ -1,0 +1,16 @@
+[
+    {
+        "name": "cashmachine_session",
+        "value": "eyJpdiI6IkJPWkZVd25lSjlZM3Zvdk1ZRlVkanc9PSIsInZhbHVlIjoiTU1JZkhZdUt3S1FuOWhyNlgxSWFPcllZazM5YlZyem50ZktaWThzbEN1NmxWOUs1eXM5QmJLa0IxVHFLRDlpSThsTFR6ZmNuaEhwREZQeHc3bmpJMmxTYkdDRTdrOTludWFUd3M1UGdLUkhPQ3RZVEtHTEdSNGt2V1JObEVhVTIiLCJtYWMiOiI0NTMwYjVhZDJiNGJhOTcyYTVlNzFkNTg5ODhmYjNhOWU0ZTgzYzgwMGFmZjU3ZDM3NWY0NjIxNWI5OWFlZTUyIiwidGFnIjoiIn0%3D",
+        "domain": "agentserver.cashmachine777.com",
+        "path": "/",
+        "expires": -1,
+        "size": 361,
+        "httpOnly": true,
+        "secure": true,
+        "session": true,
+        "priority": "Medium",
+        "sameParty": false,
+        "sourceScheme": "Secure"
+    }
+]

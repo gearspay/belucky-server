@@ -1,0 +1,16 @@
+[
+    {
+        "name": "ASP.NET_SessionId",
+        "value": "mv01uwpanch4ubi4n24qip5q",
+        "domain": "orionstars.vip",
+        "path": "/",
+        "expires": -1,
+        "size": 41,
+        "httpOnly": true,
+        "secure": false,
+        "session": true,
+        "priority": "Medium",
+        "sameParty": false,
+        "sourceScheme": "Secure"
+    }
+]
