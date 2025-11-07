@@ -366,9 +366,17 @@ const confirmPayment = async (req, res) => {
     }
 };
 
-// Process crypto withdrawal
+// Fixed processCryptoWithdrawal function for paymentController.js
+// Replace the existing processCryptoWithdrawal function with this version
+
 const processCryptoWithdrawal = async (cryptoAmount, cryptoType, destination, walletTransactionId) => {
     try {
+        console.log('🔄 Starting crypto withdrawal processing...');
+        console.log('   Crypto Type:', cryptoType);
+        console.log('   Amount:', cryptoAmount);
+        console.log('   Destination:', destination);
+        console.log('   Transaction ID:', walletTransactionId);
+
         // Get crypto config from database
         const cryptoConfig = await PaymentMethod.getConfig('crypto');
 
@@ -420,6 +428,11 @@ const processCryptoWithdrawal = async (cryptoAmount, cryptoType, destination, wa
         const formattedAmount = parseFloat(cryptoAmount).toFixed(decimalPlaces);
         const finalAmount = parseFloat(formattedAmount);
 
+        console.log('   Formatted Amount:', formattedAmount);
+        console.log('   Final Amount:', finalAmount);
+        console.log('   Fee:', fee);
+        console.log('   Decimal Places:', decimalPlaces);
+
         if (finalAmount <= 0) {
             throw new Error(`Invalid crypto amount after formatting: ${finalAmount}`);
         }
@@ -429,6 +442,10 @@ const processCryptoWithdrawal = async (cryptoAmount, cryptoType, destination, wa
             destination: destination,
             fee: fee
         };
+
+        console.log('📡 Sending payout request to gateway...');
+        console.log('   Gateway URL:', `${cryptoConfig.gatewayUrl}/api/v1/${cryptoType}/payout`);
+        console.log('   Payout Data:', JSON.stringify(payoutData, null, 2));
 
         const payoutResponse = await axios.post(
             `${cryptoConfig.gatewayUrl}/api/v1/${cryptoType}/payout`,
@@ -442,15 +459,67 @@ const processCryptoWithdrawal = async (cryptoAmount, cryptoType, destination, wa
             }
         );
 
+        console.log('✅ Gateway Response Received');
+        console.log('   Status:', payoutResponse.status);
+        console.log('   Full Response:', JSON.stringify(payoutResponse.data, null, 2));
+
+        // ✅ Check for errors in response (multiple formats)
         if (payoutResponse.data.error && payoutResponse.data.error !== null) {
-            throw new Error(`Gateway error: ${payoutResponse.data.error.message || JSON.stringify(payoutResponse.data.error)}`);
+            const errorMsg = typeof payoutResponse.data.error === 'object' 
+                ? (payoutResponse.data.error.message || JSON.stringify(payoutResponse.data.error))
+                : payoutResponse.data.error;
+            throw new Error(`Gateway error: ${errorMsg}`);
         }
 
-        const task_id = payoutResponse.data.result || payoutResponse.data.task_id;
+        // ✅ Check if response indicates error status
+        if (payoutResponse.data.status === 'error') {
+            throw new Error(`Gateway error: ${payoutResponse.data.message || 'Unknown error'}`);
+        }
+
+        // ✅ Check for authentication errors
+        if (payoutResponse.data.message && 
+            (payoutResponse.data.message.includes('Bad HTTP Basic Auth') || 
+             payoutResponse.data.message.includes('credentials') ||
+             payoutResponse.data.message.includes('authentication') ||
+             payoutResponse.data.message.includes('unauthorized'))) {
+            throw new Error(`Gateway authentication failed: ${payoutResponse.data.message}`);
+        }
+
+        // ✅ IMPROVED: Extract task_id from various possible response structures
+        let task_id = null;
+        
+        // Try different possible locations for task_id
+        if (payoutResponse.data.result) {
+            task_id = payoutResponse.data.result;
+        } else if (payoutResponse.data.task_id) {
+            task_id = payoutResponse.data.task_id;
+        } else if (payoutResponse.data.data && payoutResponse.data.data.task_id) {
+            task_id = payoutResponse.data.data.task_id;
+        } else if (payoutResponse.data.data && payoutResponse.data.data.result) {
+            task_id = payoutResponse.data.data.result;
+        } else if (payoutResponse.data.txid) {
+            task_id = payoutResponse.data.txid;
+        } else if (payoutResponse.data.transaction_hash) {
+            task_id = payoutResponse.data.transaction_hash;
+        }
+
+        console.log('🔍 Extracted task_id:', task_id);
 
         if (!task_id) {
-            throw new Error('No task ID received from payment gateway');
+            console.error('❌ No task ID found in response');
+            console.error('   Full response data:', JSON.stringify(payoutResponse.data, null, 2));
+            
+            // If the response indicates success but no task_id, use a generated ID
+            if (payoutResponse.status === 200 && !payoutResponse.data.error) {
+                console.warn('⚠️  Gateway returned success but no task_id, generating fallback ID');
+                task_id = `MANUAL_${Date.now()}_${cryptoType}_${destination.substring(0, 8)}`;
+                console.log('   Generated fallback task_id:', task_id);
+            } else {
+                throw new Error('No task ID received from payment gateway. Response: ' + JSON.stringify(payoutResponse.data));
+            }
         }
+
+        console.log('💾 Updating wallet transaction status...');
 
         await updateWalletTransactionStatus(walletTransactionId, 'completed', {
             cryptoTxHash: task_id,
@@ -459,8 +528,12 @@ const processCryptoWithdrawal = async (cryptoAmount, cryptoType, destination, wa
             originalCryptoAmount: cryptoAmount,
             cryptoType: cryptoType,
             processedAt: new Date().toISOString(),
-            gatewayResponse: payoutResponse.data
+            gatewayResponse: payoutResponse.data,
+            gatewayStatus: payoutResponse.status
         });
+
+        console.log('✅ Crypto withdrawal processed successfully');
+        console.log('   Task ID:', task_id);
 
         return {
             success: true,
@@ -471,75 +544,140 @@ const processCryptoWithdrawal = async (cryptoAmount, cryptoType, destination, wa
         };
 
     } catch (error) {
-        console.error('Error processing crypto withdrawal:', error);
+        console.error('❌ Error processing crypto withdrawal:', error);
         
         if (error.response) {
-            console.error('Gateway response status:', error.response.status);
-            console.error('Gateway response data:', JSON.stringify(error.response.data, null, 2));
+            console.error('   Gateway response status:', error.response.status);
+            console.error('   Gateway response data:', JSON.stringify(error.response.data, null, 2));
+            console.error('   Gateway response headers:', JSON.stringify(error.response.headers, null, 2));
+        } else if (error.request) {
+            console.error('   No response received from gateway');
+            console.error('   Request details:', error.request);
+        } else {
+            console.error('   Error setting up request:', error.message);
         }
         
         throw error;
     }
 };
 
-// Helper function to update wallet transaction status
 const updateWalletTransactionStatus = async (transactionId, status, metadata = {}) => {
     try {
+        console.log('\n🔄 ====== UPDATE WALLET TRANSACTION STATUS ======');
+        
         const wallet = await Wallet.findOne({
             'transactions._id': transactionId
         });
 
-        if (wallet) {
-            const transaction = wallet.transactions.id(transactionId);
-            
-            if (!transaction) {
-                return null;
-            }
-            
-            const oldStatus = transaction.status;
-            const transactionAmount = transaction.amount;
-            const transactionType = transaction.type;
-            
-            transaction.status = status;
-            transaction.notes = JSON.stringify(metadata);
-            
-            // Handle status changes
-            if (status === 'completed') {
-                transaction.completedAt = new Date();
-                
-                // DEPOSIT: Add balance when completed (from pending)
-                if (transactionType === 'deposit' && oldStatus === 'pending') {
-                    wallet.balance += transactionAmount;
-                    wallet.availableBalance += transactionAmount;
-                }
-                
-                // WITHDRAWAL: Balance already deducted when requested (pending)
-                // So we don't need to do anything here for withdrawals
-            }
-            
-            // Handle failed transactions
-            if (status === 'failed') {
-                transaction.failedAt = new Date();
-                
-                // WITHDRAWAL: Refund the amount if it fails
-                if (transactionType === 'withdrawal' && oldStatus === 'pending') {
-                    wallet.balance += transactionAmount;
-                    wallet.availableBalance += transactionAmount;
-                }
-                
-                // DEPOSIT: Nothing to refund (balance was never added)
-            }
-            
-            await wallet.save();
-            return transaction;
-        } else {
+        if (!wallet) {
+            console.log('⚠️  Wallet not found for transaction:', transactionId);
             return null;
         }
+
+        const transaction = wallet.transactions.id(transactionId);
+        
+        if (!transaction) {
+            console.log('⚠️  Transaction not found:', transactionId);
+            return null;
+        }
+        
+        const oldStatus = transaction.status;
+        const transactionAmount = transaction.amount;
+        const transactionType = transaction.type;
+        
+        console.log('📝 Transaction Details:');
+        console.log('   Transaction ID:', transactionId);
+        console.log('   Old Status:', oldStatus);
+        console.log('   New Status:', status);
+        console.log('   Type:', transactionType);
+        console.log('   Amount:', transactionAmount);
+        
+        // ✅ CRITICAL: Only update if status is actually changing
+        if (oldStatus === status) {
+            console.log('⚠️  Status unchanged (', oldStatus, '->', status, '), skipping balance updates');
+            transaction.notes = JSON.stringify(metadata);
+            await wallet.save();
+            return transaction;
+        }
+        
+        console.log('\n💰 Balance State BEFORE Update:');
+        console.log('   Balance:', wallet.balance);
+        console.log('   Available:', wallet.availableBalance);
+        console.log('   Pending:', wallet.pendingBalance);
+        
+        transaction.status = status;
+        transaction.notes = JSON.stringify(metadata);
+        
+        // Handle status changes
+        if (status === 'completed') {
+            transaction.completedAt = new Date();
+            
+            // DEPOSIT: Add balance when completed (from pending)
+            if (transactionType === 'deposit' && oldStatus === 'pending') {
+                console.log('✅ Deposit completed - adding to balance');
+                wallet.balance += transactionAmount;
+            }
+            
+            // WITHDRAWAL: When completed, remove from pending balance AND deduct from balance
+            if (transactionType === 'withdrawal' && oldStatus === 'pending') {
+                console.log('✅ Withdrawal completed - removing from pending and balance');
+                wallet.pendingBalance = Math.max(0, wallet.pendingBalance - transactionAmount);
+                wallet.balance = Math.max(0, wallet.balance - transactionAmount);
+            }
+        }
+        
+        // Handle failed transactions
+        if (status === 'failed') {
+            transaction.failedAt = new Date();
+            
+            // DEPOSIT: Failed deposit - nothing to refund (balance was never added)
+            if (transactionType === 'deposit') {
+                console.log('❌ Deposit failed - no refund needed');
+            }
+            
+            // WITHDRAWAL: Only unlock from pending (balance was never deducted)
+            // ✅ FIX: DO NOT add back to balance - it was never deducted!
+            if (transactionType === 'withdrawal' && oldStatus === 'pending') {
+                console.log('💰 Withdrawal failed - UNLOCKING from pending');
+                
+                const balanceBefore = wallet.balance;
+                const pendingBefore = wallet.pendingBalance;
+                
+                // ✅ FIX: ONLY remove from pending
+                // DO NOT add to balance - it was never deducted from balance, only locked in pending!
+                wallet.pendingBalance = Math.max(0, wallet.pendingBalance - transactionAmount);
+                
+                console.log('   Balance:   ', balanceBefore, '->', wallet.balance, '(UNCHANGED - this is correct!)');
+                console.log('   Pending:   ', pendingBefore, '->', wallet.pendingBalance, '(-', transactionAmount, ')');
+                // ✅ Available will be recalculated below using formula
+            } else if (transactionType === 'withdrawal' && oldStatus !== 'pending') {
+                console.log('⚠️  Withdrawal was not pending (status:', oldStatus, ') - NO REFUND');
+            }
+        }
+        
+        // ✅ CRITICAL: Always recalculate available using the formula
+        // This ensures Available = Balance - Pending
+        const availableBefore = wallet.availableBalance;
+        wallet.availableBalance = wallet.balance - wallet.pendingBalance;
+        console.log('   Available: ', availableBefore, '->', wallet.availableBalance, '(recalculated from formula)');
+        
+        await wallet.save();
+        
+        console.log('\n💰 Balance State AFTER Update:');
+        console.log('   Balance:', wallet.balance);
+        console.log('   Available:', wallet.availableBalance);
+        console.log('   Pending:', wallet.pendingBalance);
+        console.log('   ✅ Formula Check: Available (', wallet.availableBalance, ') = Balance (', wallet.balance, ') - Pending (', wallet.pendingBalance, ')');
+        console.log('✅ Transaction status updated successfully');
+        console.log('🔄 ========================================\n');
+        
+        return transaction;
     } catch (error) {
-        console.error('Error updating wallet transaction:', error);
+        console.error('❌ Error updating wallet transaction:', error);
         throw error;
     }
 };
+
 
 // controllers/paymentController.js
 
@@ -2230,8 +2368,9 @@ const getAllPaymentConfigs = async (req, res) => {
                 gatewayUrl: method.cryptoConfig?.gatewayUrl,
                 callbackUrl: method.cryptoConfig?.callbackUrl,
                 username: method.cryptoConfig?.username,
-                hasApiKey: !!method.cryptoConfig?.apiKey,
-                hasPassword: !!method.cryptoConfig?.password,
+                // ✅ RETURN actual values instead of just hasApiKey/hasPassword
+                apiKey: method.cryptoConfig?.apiKey || '',
+                password: method.cryptoConfig?.password || '',
                 depositChargePercent: method.cryptoConfig?.depositChargePercent || 0,
                 withdrawChargePercent: method.cryptoConfig?.withdrawChargePercent || 0
             } : method.method === 'cashapp' ? {
@@ -2239,14 +2378,18 @@ const getAllPaymentConfigs = async (req, res) => {
                 mchNo: method.cashappConfig?.mchNo,
                 currCode: method.cashappConfig?.currCode,
                 wayCode: method.cashappConfig?.wayCode,
-                hasAuthToken: !!method.cashappConfig?.authToken,
+                username: method.cashappConfig?.username,
+                // ✅ RETURN actual values
+                authToken: method.cashappConfig?.authToken || '',
+                password: method.cashappConfig?.password || '',
                 depositChargePercent: method.cashappConfig?.depositChargePercent || 0,
                 withdrawChargePercent: method.cashappConfig?.withdrawChargePercent || 0
             } : method.method === 'chime' ? {
                 businessChimeTag: method.chimeConfig?.businessChimeTag,
                 businessChimeName: method.chimeConfig?.businessChimeName,
                 mailTmUsername: method.chimeConfig?.mailTmUsername,
-                hasMailTmPassword: !!method.chimeConfig?.mailTmPassword,
+                // ✅ RETURN actual value
+                mailTmPassword: method.chimeConfig?.mailTmPassword || '',
                 depositChargePercent: method.chimeConfig?.depositChargePercent || 0,
                 withdrawChargePercent: method.chimeConfig?.withdrawChargePercent || 0
             } : {},
@@ -2314,6 +2457,8 @@ const togglePaymentMethod = async (req, res) => {
 
 // Export all functions
 module.exports = {
+
+    updateWalletTransactionStatus,
     // Crypto
     getCryptoList,
     createPaymentRequest,

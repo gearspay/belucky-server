@@ -510,9 +510,7 @@ const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
             });
         }
 
-        // ✅ Use processCryptoWithdrawal from paymentController
         const { processCryptoWithdrawal } = require('./paymentController');
-
         const finalCryptoAmount = cryptoAmount || amount;
 
         console.log('🔄 Processing crypto withdrawal via gateway...');
@@ -532,10 +530,9 @@ const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
         console.log('   Task ID:', withdrawalResult.task_id);
         console.log('   TX Hash:', withdrawalResult.transaction_hash);
 
-        // The transaction status is already updated by processCryptoWithdrawal
-        // But we need to reload the wallet to get the updated transaction
-        await wallet.save();
-
+        // Reload wallet to get updated state
+        const updatedWallet = await Wallet.findById(wallet._id);
+        
         res.json({
             success: true,
             message: 'Crypto withdrawal processed successfully',
@@ -547,8 +544,8 @@ const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
                 status: 'completed',
                 cryptoType: cryptoType,
                 withdrawalAddress: withdrawalAddress,
-                newPendingBalance: wallet.pendingBalance,
-                newAvailableBalance: wallet.availableBalance
+                newPendingBalance: updatedWallet.pendingBalance,
+                newAvailableBalance: updatedWallet.availableBalance
             }
         });
 
@@ -557,16 +554,34 @@ const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
         console.error('   Error message:', error.message);
         console.error('   Error response:', error.response?.data);
 
-        // Mark transaction as failed and refund
-        wallet.pendingBalance = Math.max(0, wallet.pendingBalance - transaction.amount);
-        wallet.balance += transaction.amount;
-        wallet.availableBalance += transaction.amount;
+        // ✅ CRITICAL FIX: Do NOT manually adjust balances here
+        // Let updateWalletTransactionStatus handle everything
         
-        transaction.status = 'failed';
-        transaction.failedAt = new Date();
-        transaction.description = `Crypto withdrawal - Failed: ${error.message}`;
-        
-        await wallet.save();
+        // Just mark transaction as failed - the helper function will handle refund
+        try {
+            // Get fresh wallet state before update
+            const freshWallet = await Wallet.findById(wallet._id);
+            const freshTransaction = freshWallet.transactions.id(transaction._id);
+            
+            // Only update if still pending (prevent double processing)
+            if (freshTransaction && freshTransaction.status === 'pending') {
+                console.log('🔄 Marking transaction as failed and triggering refund...');
+                
+                // ✅ This will handle the refund properly - no manual balance adjustments needed
+                const { updateWalletTransactionStatus } = require('./paymentController');
+                await updateWalletTransactionStatus(transaction._id, 'failed', {
+                    error: error.message,
+                    errorResponse: error.response?.data,
+                    failedAt: new Date().toISOString()
+                });
+                
+                console.log('✅ Transaction marked as failed and refund completed');
+            } else {
+                console.log('⚠️  Transaction already processed, skipping refund');
+            }
+        } catch (updateError) {
+            console.error('❌ Error updating transaction status:', updateError);
+        }
 
         res.status(500).json({
             success: false,

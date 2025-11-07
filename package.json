@@ -27,7 +27,8 @@
     "node-cron": "^4.2.1",
     "puppeteer": "^24.17.1",
     "rate-limit-mongo": "^2.3.2",
-    "recharts": "^3.3.0"
+    "recharts": "^3.3.0",
+    "chalk": "^4.1.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
