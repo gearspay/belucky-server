@@ -469,46 +469,43 @@ class FireKirinController {
     }
 
         async checkAuthorization() {
-        try {
-            // Prevent multiple authorization attempts
-            if (this.isAuthorizing) {
-                this.log('Authorization already in progress, skipping...');
-                return;
-            }
+    try {
+        // Prevent multiple authorization attempts
+        if (this.isAuthorizing) {
+            this.log('Authorization already in progress, skipping...');
+            return;
+        }
 
-            if (!this.page || this.page.isClosed()) {
-                this.log('Page is closed, recreating browser...');
-                await this.createBrowser();
-                return;
-            }
+        if (!this.page || this.page.isClosed()) {
+            this.log('Page is closed, recreating browser...');
+            await this.createBrowser();
+            return;
+        }
 
-            this.log('Checking authorization status...');
+        this.log('Checking authorization status...');
+        
+        await this.page.goto(`https://firekirin.xyz:8888/Store.aspx`, {
+            waitUntil: 'domcontentloaded',
+            timeout: 15000
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        const currentPath = await this.page.evaluate(() => location.pathname);
+        this.log(`Landed on: ${currentPath}`);
+
+        if (currentPath === '/default.aspx') {
+            this.authorized = false;
+            this.log('Redirected to login page - need to authorize');
+            await this.authorize();
+            return;
+        } else {
+            this.log('On Store.aspx, verifying iframe...');
             
-            await this.page.goto(`https://firekirin.xyz:8888/Store.aspx`, {
-                waitUntil: 'domcontentloaded',
-                timeout: 15000
-            });
-
-            // Wait a moment for any redirect
-            await new Promise(resolve => setTimeout(resolve, 1500));
-
-            const currentPath = await this.page.evaluate(() => location.pathname);
-            this.log(`Landed on: ${currentPath}`);
-
-            if (currentPath === '/default.aspx') {
-                this.authorized = false;
-                this.log('Redirected to login page - need to authorize');
-                
-                // Call authorize and wait for it to complete (including iframe wait)
-                await this.authorize();
-                return;
-            } else {
-                this.log('On Store.aspx, verifying iframe...');
-                
-                // Wait for iframe to be ready
+            // ✅ ADD TRY-CATCH HERE
+            try {
                 await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
                 
-                // Wait for iframe content to be accessible
                 await this.page.waitForFunction(() => {
                     const iframe = document.querySelector('#frm_main_content');
                     if (!iframe) return false;
@@ -529,26 +526,41 @@ class FireKirinController {
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 this.checkQueue();
                 return true;
-            }
-        } catch (error) {
-            this.error(`Error checking authorization: ${error.message}`);
-            
-            if (error.message.includes('detached Frame') || 
-                error.message.includes('Target closed') ||
-                error.message.includes('Session closed')) {
-                this.log('Detected detached frame, recreating browser...');
-                this.browserReady = false;
-                this.initialized = false;
-                await this.createBrowser();
+                
+            } catch (iframeError) {
+                // ✅ HANDLE IFRAME FAILURE
+                this.error(`Iframe failed to load: ${iframeError.message}`);
+                this.log('⚠️  FireKirin might be down or URL changed. Waiting 30 seconds before retry...');
+                
+                // ✅ LONGER BACKOFF
+                setTimeout(() => {
+                    this.log('Retrying authorization after backoff...');
+                    this.checkAuthorization();
+                }, 30000); // Wait 30 seconds instead of 5
+                
                 return;
             }
-            
-            // Only retry if not already authorizing
-            if (!this.isAuthorizing) {
-                setTimeout(() => this.checkAuthorization(), 5000);
-            }
+        }
+    } catch (error) {
+        this.error(`Error checking authorization: ${error.message}`);
+        
+        if (error.message.includes('detached Frame') || 
+            error.message.includes('Target closed') ||
+            error.message.includes('Session closed')) {
+            this.log('Detected detached frame, recreating browser...');
+            this.browserReady = false;
+            this.initialized = false;
+            await this.createBrowser();
+            return;
+        }
+        
+        // ✅ BACKOFF ON RETRY
+        if (!this.isAuthorizing) {
+            this.log('Authorization failed, waiting 30 seconds before retry...');
+            setTimeout(() => this.checkAuthorization(), 30000); // Increased from 5s to 30s
         }
     }
+}
 
     async authorize() {
         if (this.authorizationInProgress) {

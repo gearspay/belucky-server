@@ -494,97 +494,145 @@ class JuwaController {
         await this.checkAuthorization();
     }
 
-    async checkAuthorization() {
-        try {
-            if (this.isAuthorizing) {
-                this.log('Authorization already in progress, waiting...');
-                if (this.authorizationPromise) {
-                    await this.authorizationPromise;
-                }
-                return;
+   async checkAuthorization() {
+    try {
+        if (this.isAuthorizing) {
+            this.log('Authorization already in progress, waiting...');
+            if (this.authorizationPromise) {
+                await this.authorizationPromise;
             }
+            return;
+        }
 
-            if (!this.page || this.page.isClosed()) {
-                this.log('Page is closed, recreating browser...');
-                await this.createBrowser();
-                return;
-            }
+        if (!this.page || this.page.isClosed()) {
+            this.log('Page is closed, recreating browser...');
+            await this.createBrowser();
+            return;
+        }
 
-            this.log('Checking authorization status...');
-            
-            await this.page.goto('https://ht.juwa777.com/userManagement', {
-                waitUntil: 'load',
-                timeout: 15000
-            });
+        this.log('Checking authorization status...');
+        
+        await this.page.goto('https://ht.juwa777.com/userManagement', {
+            waitUntil: 'load',
+            timeout: 15000
+        });
 
-            const sessionPath = path.join(__dirname, 'sessionjuwa.json');
-            if (existsSync(sessionPath)) {
-                try {
-                    const session = readFileSync(sessionPath).toString();
-                    const session_parsed = JSON.parse(session);
+        const sessionPath = path.join(__dirname, 'sessionjuwa.json');
+        if (existsSync(sessionPath)) {
+            try {
+                const session = readFileSync(sessionPath).toString();
+                const session_parsed = JSON.parse(session);
 
-                    await this.page.evaluate((session_parsed) => {
-                        for (const key of Object.keys(session_parsed)) {
-                            sessionStorage.setItem(key, session_parsed[key]);
-                        }
-                    }, session_parsed);
+                await this.page.evaluate((session_parsed) => {
+                    for (const key of Object.keys(session_parsed)) {
+                        sessionStorage.setItem(key, session_parsed[key]);
+                    }
+                }, session_parsed);
 
-                    await this.page.goto('https://ht.juwa777.com/userManagement', {
-                        waitUntil: 'domcontentloaded',
-                        timeout: 15000
-                    });
-                    
-                    this.log('Session storage loaded');
-                } catch (error) {
-                    this.log('Error loading session, continuing without it');
-                }
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
-            const isLoginPage = await this.page.evaluate(() => {
-                const div = document.querySelector('div[aria-label="Login timeout"]');
-                if (div) return true;
-                return location.pathname === '/login';
-            });
-
-            if (isLoginPage) {
-                this.authorized = false;
-                this.log('Not authorized - need to login');
-                await this.authorize();
-                return;
-            } else {
-                this.log('Already authorized');
-                this.authorized = true;
-                this.initialized = true;
-                this.browserReady = true;
+                // ✅ RELOAD AFTER SETTING SESSION STORAGE
+                await this.page.goto('https://ht.juwa777.com/userManagement', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                });
                 
-                if (this.requestQueue.length > 0 && !this.isProcessingQueue) {
-                    this.log('Authorization complete, starting queue processor...');
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    setImmediate(() => this.processQueue());
-                }
-                
-                return true;
-            }
-        } catch (error) {
-            this.error(`Error checking authorization: ${error.message}`);
-            
-            if (error.message.includes('detached Frame') || 
-                error.message.includes('Target closed') ||
-                error.message.includes('Session closed')) {
-                this.log('Detected detached frame, recreating browser...');
-                this.browserReady = false;
-                this.initialized = false;
-                await this.createBrowser();
-                return;
-            }
-            
-            if (!this.isAuthorizing) {
-                setTimeout(() => this.checkAuthorization(), 5000);
+                this.log('Session storage loaded and page reloaded');
+            } catch (error) {
+                this.log('Error loading session, continuing without it');
             }
         }
+
+        // ✅ FIX: Wait for EITHER login page OR authenticated content
+        this.log('Waiting for page to settle and determine auth state...');
+        
+        const authState = await Promise.race([
+            // Wait for login form (means not authenticated)
+            this.page.waitForSelector('.imgCode', { timeout: 8000 })
+                .then(() => 'login_page')
+                .catch(() => null),
+            
+            // Wait for authenticated content (means authenticated)
+            this.page.waitForSelector('.el-table, [class*="user-management"]', { timeout: 8000 })
+                .then(() => 'authenticated')
+                .catch(() => null),
+            
+            // Fallback timeout
+            new Promise(resolve => setTimeout(() => resolve('timeout'), 10000))
+        ]);
+
+        this.log(`Auth state detected: ${authState}`);
+
+        // ✅ IMPROVED CHECK
+        const isLoginPage = await this.page.evaluate(() => {
+            // Check for login timeout dialog
+            const timeoutDiv = document.querySelector('div[aria-label="Login timeout"]');
+            if (timeoutDiv) {
+                return true;
+            }
+            
+            // Check if on login page
+            if (location.pathname === '/login') {
+                return true;
+            }
+            
+            // Check if login form exists
+            const loginForm = document.querySelector('.imgCode');
+            if (loginForm) {
+                return true;
+            }
+            
+            // Check for user management elements (means we're logged in)
+            const userManagement = document.querySelector('.el-table') || 
+                                  document.querySelector('[class*="user"]');
+            if (userManagement) {
+                return false;
+            }
+            
+            // If unsure and authState was 'authenticated', trust that
+            return true; // Default to need login if truly unsure
+        });
+
+        // ✅ COMBINE RACE RESULT WITH EVALUATION
+        const needsLogin = authState === 'login_page' || isLoginPage;
+
+        if (needsLogin) {
+            this.authorized = false;
+            this.log('Not authorized - need to login');
+            await this.authorize();
+            return;
+        } else {
+            this.log('✅ Already authorized (session valid)');
+            this.authorized = true;
+            this.initialized = true;
+            this.browserReady = true;
+            
+            if (this.requestQueue.length > 0 && !this.isProcessingQueue) {
+                this.log('Authorization confirmed, starting queue processor...');
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                setImmediate(() => this.processQueue());
+            }
+            
+            return true;
+        }
+    } catch (error) {
+        this.error(`Error checking authorization: ${error.message}`);
+        
+        if (error.message.includes('detached Frame') || 
+            error.message.includes('Target closed') ||
+            error.message.includes('Session closed')) {
+            this.log('Detected detached frame, recreating browser...');
+            this.browserReady = false;
+            this.initialized = false;
+            await this.createBrowser();
+            return;
+        }
+        
+        // If check fails, assume need to login
+        if (!this.isAuthorizing) {
+            this.log('Check authorization failed, attempting login...');
+            setTimeout(() => this.authorize(), 3000);
+        }
     }
+}
 
     async reload() {
         this.log('Reloading and clearing session files...');

@@ -1872,474 +1872,447 @@ class MilkyWaysController {
 }
 
     async recharge({ id, login, amount, remark, is_manual }) {
-        try {
-            // Ensure browser is ready
-            await this.ensureBrowserReady();
-            
-            const currentPath = await this.page.evaluate(() => location.pathname);
-            
-            if (currentPath === '/default.aspx') {
-                this.authorized = false;
-                await this.authorize();
-                return -1;
-            }
+    console.log('🔴 RECHARGE START:', { id, login, amount, remark, is_manual });
+    
+    try {
+        await this.ensureBrowserReady();
+        
+        const currentPath = await this.page.evaluate(() => location.pathname);
+        
+        if (currentPath === '/default.aspx') {
+            this.authorized = false;
+            await this.authorize();
+            return -1;
+        }
 
-            // Verify iframe is accessible
-            const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
-            if (!iframeAccessible) {
-                this.error('Iframe not accessible for recharge');
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            }
+        // Check session errors
+        const hasSessionError = await this.page.evaluate(() => {
+            const msg = document.querySelector('#mb_con p');
+            if (!msg) return false;
+            const text = msg.innerText || msg.textContent;
+            return text.includes('Session timeout') || text.includes('Please login again');
+        });
 
-            await this.page.evaluate(login => {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-                iframe_document.querySelector('#txtSearch').value = login;
-                iframe_document.querySelectorAll('#content a')[0].click();
-            }, login);
+        if (hasSessionError) {
+            this.log('Session error detected, re-authorizing...');
+            this.authorized = false;
+            await this.authorize();
+            return -1;
+        }
 
-            await this.page.waitForFunction((login) => {
-                const iframe = document.querySelector('#frm_main_content');
-                if (!iframe) return false;
-                const iframe_document = iframe.contentWindow.document;
-                const items = iframe_document.querySelectorAll('#item tr');
-                return items.length >= 2;
-            }, { timeout: 5000 }, login);
+        // Verify iframe is accessible
+        const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
+        if (!iframeAccessible) {
+            this.error('Iframe not accessible for recharge');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
 
-            await new Promise(resolve => setTimeout(resolve, 1000));
+        // Search for account
+        console.log('Searching for account:', login);
+        await this.page.evaluate(login => {
+            const iframe = document.querySelector('#frm_main_content');
+            const iframe_document = iframe.contentWindow.document;
+            iframe_document.querySelector('#txtSearch').value = login;
+            iframe_document.querySelectorAll('#content a')[0].click();
+        }, login);
 
-            const login_selected = await this.page.evaluate(login => {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-                const items = iframe_document.querySelectorAll('#item tr');
+        await this.page.waitForFunction((login) => {
+            const iframe = document.querySelector('#frm_main_content');
+            if (!iframe) return false;
+            const iframe_document = iframe.contentWindow.document;
+            const items = iframe_document.querySelectorAll('#item tr');
+            return items.length >= 2;
+        }, { timeout: 5000 }, login);
 
-                if (items.length < 2) return false;
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
-                for (let i = 1; i < items.length; i++) {
-                    const tds = items[i].querySelectorAll('td');
-                    if (tds[2].innerText.trim().toLowerCase() === login.toLowerCase()) {
-                        tds[0].querySelector('a').click();
-                        return true;
-                    }
+        // Select account
+        const login_selected = await this.page.evaluate(login => {
+            const iframe = document.querySelector('#frm_main_content');
+            const iframe_document = iframe.contentWindow.document;
+            const items = iframe_document.querySelectorAll('#item tr');
+
+            if (items.length < 2) return false;
+
+            for (let i = 1; i < items.length; i++) {
+                const tds = items[i].querySelectorAll('td');
+                if (tds[2].innerText.trim().toLowerCase() === login.toLowerCase()) {
+                    tds[0].querySelector('a').click();
+                    return true;
                 }
-                return false;
-            }, login);
-
-            if (!login_selected) {
-                this.error(`Error while deposit: login ${login} not found!`);
-                await Tasks.error(id, 'login not found');
-                return false;
             }
+            return false;
+        }, login);
 
-            await new Promise(resolve => setTimeout(resolve, 1000));
+        if (!login_selected) {
+            this.error(`Error while deposit: login ${login} not found!`);
+            await Tasks.error(id, 'login not found');
+            return false;
+        }
 
-            await this.page.evaluate(() => {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-                const links = iframe_document.querySelectorAll('.btn12');
-                links[2].click();
-                return true;
-            });
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
-            await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
-            await new Promise(resolve => setTimeout(resolve, 1000));
+        // ✅ OPTIMIZED: Click recharge button directly at index 1
+        console.log('Clicking RECHARGE button (index 1)...');
+        await this.page.evaluate(() => {
+            const iframe = document.querySelector('#frm_main_content');
+            const iframe_document = iframe.contentWindow.document;
+            const links = iframe_document.querySelectorAll('.btn12');
+            links[1].click(); // ✅ Direct click - Button[1] = Recharge
+        });
+        console.log('✅ Recharge button clicked');
 
-            const current_balance = await this.page.evaluate(() => {
-                const iframe = document.querySelector('#Container iframe');
+        await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
+        
+        // Wait for dialog to be fully ready
+        await this.page.waitForFunction(() => {
+            const iframe = document.querySelector('#Container iframe');
+            if (!iframe) return false;
+            
+            try {
                 const iframe_document = iframe.contentWindow.document;
                 const balance_input = iframe_document.querySelector('#txtLeScore');
-
-                if (!balance_input) return false;
-                return parseInt(balance_input.value);
-            });
-
-            if (current_balance >= 2) {
-                this.error(`Could not deposit ${amount} to login ${login} (Balance more than $2 -> ${current_balance})`);
-                
-                if (is_manual) {
-                    await Tasks.cancel(id, ` balance is more than $2 (${current_balance})`);
-                }
-                
-                await Tasks.error(id, `balance is more than $2 (${current_balance})`);
-                return false;
-            }
-
-            const session_amount = await this.page.evaluate(({ amount, remark }) => {
-                const iframe = document.querySelector('#Container iframe');
-                const iframe_document = iframe.contentWindow.document;
-
                 const amount_input = iframe_document.querySelector('#txtAddGold');
                 const remark_input = iframe_document.querySelector('#txtReason');
                 const button = iframe_document.querySelector('#Button1');
-
-                if (!amount_input || !remark_input || !button) return false;
-
-                const balance_input = iframe_document.querySelector('#txtLeScore');
-                const session_amount = parseInt(balance_input.value) + amount;
-
-                amount_input.value = amount;
-                remark_input.value = remark;
-                button.click();
-
-                return session_amount;
-            }, { amount, remark });
-
-            if (!session_amount) {
-                await Tasks.error(id, `session amount doesn't exist`);
+                
+                return balance_input && amount_input && remark_input && button;
+            } catch (e) {
                 return false;
             }
+        }, { timeout: 10000 });
+        
+        await new Promise(resolve => setTimeout(resolve, 1500));
 
-            await this.page.waitForSelector('#mb_con p', { timeout: 60000 });
+        // Read current balance
+        const current_balance = await this.page.evaluate(() => {
+            const iframe = document.querySelector('#Container iframe');
+            const iframe_document = iframe.contentWindow.document;
+            const balance_input = iframe_document.querySelector('#txtLeScore');
 
-            const result = await this.page.evaluate(() => {
-                const closeButton = document.querySelector('#Close');
-                if (closeButton) closeButton.click();
-                return document.querySelector('#mb_con p').innerText;
-            });
+            if (!balance_input) return false;
+            return parseInt(balance_input.value);
+        });
 
-            await this.page.click("#mb_btn_ok");
+        console.log('Player balance:', current_balance);
 
-            if (result === "Confirmed successful") {
-                this.log(`Successfully deposit ${amount} to login ${login}`);
-                
-                // Update database
-                try {
-                    const gameAccount = await GameAccount.findOne({ gameLogin: login });
-                    if (gameAccount) {
-                        await gameAccount.updateBalance(session_amount, id);
-                    }
-                } catch (dbError) {
-                    this.error(`Error updating balance in DB: ${dbError.message}`);
-                }
-                
-                await Tasks.approve(id, session_amount);
-                
-                // Invalidate admin balance cache
-                this.cache.adminBalance = null;
-                this.cache.adminBalanceTimestamp = null;
-                
-                return true;
-            } else {
-                this.log(`Error while deposit ${amount} to login ${login}`);
-                await Tasks.error(id, `wrong message: ${result}`);
-                return false;
-            }
-
-        } catch (error) {
-            this.error(`Error during recharge: ${error.message}`);
+        if (current_balance >= 2) {
+            this.error(`Could not deposit ${amount} to login ${login} (Balance more than $2 -> ${current_balance})`);
             
-            // Handle session errors
-            if (error.message.includes('Session closed') || 
-                error.message.includes('Target closed')) {
-                this.browserReady = false;
-                this.initialized = false;
-                await this.reinitialize();
-                return -1;
+            if (is_manual) {
+                await Tasks.cancel(id, ` balance is more than $2 (${current_balance})`);
             }
             
+            await Tasks.error(id, `balance is more than $2 (${current_balance})`);
             return false;
         }
-    }
 
-    async redeem({ id, login, amount, remark, is_manual = false }) {
-        console.log('🔴 REDEEM START:', { id, login, amount, remark, is_manual });
+        // Fill form
+        console.log('Filling recharge form...');
+        const session_amount = await this.page.evaluate(({ amount, remark }) => {
+            const iframe = document.querySelector('#Container iframe');
+            const iframe_document = iframe.contentWindow.document;
+
+            const amount_input = iframe_document.querySelector('#txtAddGold');
+            const remark_input = iframe_document.querySelector('#txtReason');
+            const button = iframe_document.querySelector('#Button1');
+
+            if (!amount_input || !remark_input || !button) return false;
+
+            const balance_input = iframe_document.querySelector('#txtLeScore');
+            const session_amount = parseInt(balance_input.value) + amount;
+
+            amount_input.value = '';
+            amount_input.focus();
+            amount_input.value = amount.toString();
+            amount_input.dispatchEvent(new Event('input', { bubbles: true }));
+            amount_input.dispatchEvent(new Event('change', { bubbles: true }));
+            
+            remark_input.value = '';
+            remark_input.value = remark;
+            
+            button.click();
+
+            return session_amount;
+        }, { amount, remark });
+
+        if (!session_amount) {
+            await Tasks.error(id, `session amount doesn't exist`);
+            return false;
+        }
+
+        console.log('Waiting for result...');
+        await this.page.waitForSelector('#mb_con p', { timeout: 60000 });
+
+        const result = await this.page.evaluate(() => {
+            const closeButton = document.querySelector('#Close');
+            if (closeButton) closeButton.click();
+            return document.querySelector('#mb_con p').innerText;
+        });
+
+        console.log('Result:', result);
+        await this.page.click("#mb_btn_ok");
+
+        if (result === "Confirmed successful") {
+            this.log(`Successfully deposit ${amount} to login ${login}`);
+            
+            try {
+                const gameAccount = await GameAccount.findOne({ gameLogin: login });
+                if (gameAccount) {
+                    await gameAccount.updateBalance(session_amount, id);
+                }
+            } catch (dbError) {
+                this.error(`Error updating balance in DB: ${dbError.message}`);
+            }
+            
+            await Tasks.approve(id, session_amount);
+            
+            this.cache.adminBalance = null;
+            this.cache.adminBalanceTimestamp = null;
+            
+            console.log('✅ RECHARGE SUCCESS');
+            return true;
+        } else {
+            this.log(`Error while deposit ${amount} to login ${login}: ${result}`);
+            await Tasks.error(id, `wrong message: ${result}`);
+            return false;
+        }
+
+    } catch (error) {
+        this.error(`Error during recharge: ${error.message}`);
+        
+        if (error.message.includes('Session closed') || 
+            error.message.includes('Target closed')) {
+            this.browserReady = false;
+            this.initialized = false;
+            await this.reinitialize();
+            return -1;
+        }
+        
+        return false;
+    }
+}
+
+async redeem({ id, login, amount, remark, is_manual = false }) {
+    console.log('🔴 REDEEM START:', { id, login, amount, remark, is_manual });
+    
+    try {
+        await this.ensureBrowserReady();
+        
+        const currentPath = await this.page.evaluate(() => location.pathname);
+        
+        if (currentPath === '/default.aspx') {
+            this.authorized = false;
+            await this.authorize();
+            return -1;
+        }
+
+        // Verify iframe is accessible
+        const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
+        if (!iframeAccessible) {
+            this.error('Iframe not accessible for redeem');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+
+        // Search for account
+        console.log('Searching for account:', login);
+        await this.page.evaluate(login => {
+            const iframe = document.querySelector('#frm_main_content');
+            const iframe_document = iframe.contentWindow.document;
+
+            const checkbox = iframe_document.querySelector('#ShowHideAccount_0');
+            if (checkbox && !checkbox.checked) {
+                checkbox.click();
+            }
+
+            iframe_document.querySelector('#txtSearch').value = login;
+            iframe_document.querySelectorAll('#content a')[0].click();
+        }, login);
+
+        await this.page.waitForFunction((login) => {
+            const iframe = document.querySelector('#frm_main_content');
+            if (!iframe) return false;
+            const iframe_document = iframe.contentWindow.document;
+            const items = iframe_document.querySelectorAll('#item tr');
+            return items.length >= 2;
+        }, { timeout: 5000 }, login);
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Select account
+        const login_selected = await this.page.evaluate(login => {
+            const iframe = document.querySelector('#frm_main_content');
+            const iframe_document = iframe.contentWindow.document;
+            const items = iframe_document.querySelectorAll('#item tr');
+
+            if (items.length < 2) return false;
+
+            for (let i = 1; i < items.length; i++) {
+                const tds = items[i].querySelectorAll('td');
+                const accountName = tds[2].innerText.trim().toLowerCase();
+                
+                if (accountName === login.toLowerCase()) {
+                    tds[0].querySelector('a').click();
+                    return true;
+                }
+            }
+            return false;
+        }, login);
+
+        if (!login_selected) {
+            this.error(`Login ${login} not found in redeem`);
+            await Tasks.error(id, 'login not found');
+            return false;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // ✅ OPTIMIZED: Click redeem button directly at index 2
+        console.log('Clicking REDEEM button (index 2)...');
+        await this.page.evaluate(() => {
+            const iframe = document.querySelector('#frm_main_content');
+            const iframe_document = iframe.contentWindow.document;
+            const links = iframe_document.querySelectorAll('.btn12');
+            links[2].click(); // ✅ Direct click - Button[2] = Redeem
+        });
+        console.log('✅ Redeem button clicked');
+
+        await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // Read current balance
+        const current_balance = await this.page.evaluate(() => {
+            const iframe = document.querySelector('#Container iframe');
+            if (!iframe) return false;
+            
+            const iframe_document = iframe.contentWindow.document;
+            const balance_input = iframe_document.querySelector('#txtLeScore');
+
+            if (!balance_input) return false;
+            
+            return parseFloat(parseFloat(balance_input.value).toFixed(2));
+        });
+
+        console.log('Current balance:', current_balance);
+
+        if (current_balance === false) {
+            await Tasks.error(id, 'Could not read balance');
+            return false;
+        }
+
+        // Validate balance
+        if (!is_manual) {
+            if (parseInt(current_balance) !== parseInt(amount)) {
+                console.log(`Balance mismatch: Expected ${amount}, got ${current_balance}`);
+                await Tasks.cancel(id, parseInt(current_balance));
+                return true;
+            }
+        }
+
+        if (is_manual) {
+            if (parseInt(current_balance) < parseInt(amount)) {
+                console.log(`Insufficient balance: Has ${current_balance}, needs ${amount}`);
+                await Tasks.cancel(id, parseInt(current_balance));
+                return true;
+            }
+        }
+
+        // Fill form
+        console.log('Filling redeem form...');
+        const processed = await this.page.evaluate(({ amount, remark }) => {
+            const iframe = document.querySelector('#Container iframe');
+            if (!iframe) return false;
+            
+            const iframe_document = iframe.contentWindow.document;
+
+            const amount_input = iframe_document.querySelector('#txtAddGold');
+            const remark_input = iframe_document.querySelector('#txtReason');
+            const button = iframe_document.querySelector('#Button1');
+
+            if (!amount_input || !remark_input || !button) return false;
+
+            amount_input.value = amount;
+            remark_input.value = remark;
+            button.click();
+
+            return true;
+        }, { amount, remark });
+
+        if (!processed) {
+            await Tasks.error(id, 'Failed to fill form');
+            return false;
+        }
+
+        console.log('Waiting for result...');
+        await this.page.waitForSelector('#mb_con p', { timeout: 30000 });
+
+        const result = await this.page.evaluate(() => {
+            const closeButton = document.querySelector('#Close');
+            if (closeButton) closeButton.click();
+            const messageEl = document.querySelector('#mb_con p');
+            return messageEl ? messageEl.innerText : 'No message found';
+        });
+
+        console.log('Result:', result);
+        await this.page.click("#mb_btn_ok");
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        if (result === "Confirmed successful") {
+            const newBalance = parseFloat((current_balance - amount).toFixed(2));
+            this.log(`Successfully cashout ${amount} from login ${login}`);
+            
+            try {
+                const gameAccount = await GameAccount.findOne({ gameLogin: login });
+                if (gameAccount) {
+                    await gameAccount.updateBalance(newBalance, id);
+                }
+            } catch (dbError) {
+                this.error(`Error updating balance in DB: ${dbError.message}`);
+            }
+            
+            await Tasks.approve(id, newBalance);
+            
+            this.cache.adminBalance = null;
+            this.cache.adminBalanceTimestamp = null;
+            
+            console.log('✅ REDEEM SUCCESS');
+            return true;
+            
+        } else {
+            if (result === "Sorry, there is not enough gold for the operator!") {
+                await Tasks.cancel(id);
+            }
+            this.log(`Error while cashout ${amount} from login ${login}: ${result}`);
+            await Tasks.error(id, result);
+            return false;
+        }
+
+    } catch (error) {
+        this.error(`Error during redeem: ${error.message}`);
+        
+        if (error.message.includes('Session closed') || 
+            error.message.includes('Target closed') ||
+            error.message.includes('detached Frame')) {
+            this.browserReady = false;
+            this.initialized = false;
+            await this.reinitialize();
+            return -1;
+        }
         
         try {
-            // Ensure browser is ready
-            await this.ensureBrowserReady();
-            
-            // Step 1: Check page state
-            console.log('Step 1: Checking page state...');
-            const currentPath = await this.page.evaluate(() => location.pathname);
-            console.log('Current path:', currentPath);
-            
-            if (currentPath === '/default.aspx') {
-                console.log('Need to authorize, returning -1');
-                this.authorized = false;
-                await this.authorize();
-                return -1;
-            }
-
-            // Verify iframe is accessible
-            const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
-            if (!iframeAccessible) {
-                this.error('Iframe not accessible for redeem');
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            }
-
-            // Step 2: Search for account
-            console.log('Step 2: Searching for account...');
-            await this.page.evaluate(login => {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-
-                const checkbox = iframe_document.querySelector('#ShowHideAccount_0');
-                if (checkbox && !checkbox.checked) {
-                    console.log('Clicking checkbox to show hidden accounts');
-                    checkbox.click();
-                }
-
-                iframe_document.querySelector('#txtSearch').value = login;
-                iframe_document.querySelectorAll('#content a')[0].click();
-            }, login);
-
-            // Step 3: Wait for search results
-            console.log('Step 3: Waiting for search results...');
-            await this.page.waitForFunction((login) => {
-                const iframe = document.querySelector('#frm_main_content');
-                if (!iframe) return false;
-                const iframe_document = iframe.contentWindow.document;
-                const items = iframe_document.querySelectorAll('#item tr');
-                return items.length >= 2;
-            }, { timeout: 5000 }, login);
-            console.log('Search results loaded');
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
-            // Step 4: Select account
-            console.log('Step 4: Selecting account...');
-            const login_selected = await this.page.evaluate(login => {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-                const items = iframe_document.querySelectorAll('#item tr');
-
-                console.log('Found rows:', items.length);
-
-                if (items.length < 2) {
-                    console.log('No results found');
-                    return false;
-                }
-
-                for (let i = 1; i < items.length; i++) {
-                    const tds = items[i].querySelectorAll('td');
-                    const accountName = tds[2].innerText.trim().toLowerCase();
-                    console.log('Row', i, ':', accountName);
-                    
-                    if (accountName === login.toLowerCase()) {
-                        console.log('Found match at row', i);
-                        tds[0].querySelector('a').click();
-                        return true;
-                    }
-                }
-                
-                console.log('No matching account found');
-                return false;
-            }, login);
-
-            if (!login_selected) {
-                const errorMsg = `Login ${login} not found in redeem`;
-                console.log('❌', errorMsg);
-                this.error(errorMsg);
-                await Tasks.error(id, 'login not found');
-                return false;
-            }
-            console.log('✅ Account selected');
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
-            // Step 5: Click redeem button
-            console.log('Step 5: Clicking redeem button...');
-            await this.page.evaluate(() => {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-                const links = iframe_document.querySelectorAll('.btn12');
-                console.log('Found buttons:', links.length);
-                console.log('Clicking button index 3 (redeem)');
-                links[3].click();
-                return true;
+            await this.page.goto('https://milkywayapp.xyz:8781/Store.aspx', {
+                waitUntil: 'networkidle2',
+                timeout: 10000
             });
-
-            // Step 6: Wait for redeem dialog
-            console.log('Step 6: Waiting for redeem dialog...');
-            await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            console.log('✅ Dialog opened');
-
-            // Step 7: Read current balance
-            console.log('Step 7: Reading current balance...');
-            const current_balance = await this.page.evaluate(() => {
-                const iframe = document.querySelector('#Container iframe');
-                if (!iframe) {
-                    console.log('Container iframe not found');
-                    return false;
-                }
-                
-                const iframe_document = iframe.contentWindow.document;
-                const balance_input = iframe_document.querySelector('#txtLeScore');
-
-                if (!balance_input) {
-                    console.log('Balance input not found');
-                    return false;
-                }
-                
-                const balanceValue = balance_input.value;
-                console.log('Balance input value:', balanceValue);
-                return parseFloat(parseFloat(balanceValue).toFixed(2));
-            });
-
-            console.log('Current balance:', current_balance);
-
-            if (current_balance === false) {
-                const errorMsg = 'Could not read balance from redeem dialog';
-                console.log('❌', errorMsg);
-                await Tasks.error(id, errorMsg);
-                return false;
-            }
-
-            // Step 8: Validate balance
-            console.log('Step 8: Validating balance...');
-            if (!is_manual) {
-                if (parseInt(current_balance) !== parseInt(amount)) {
-                    console.log(`⚠️  Balance mismatch: Expected ${amount}, got ${current_balance}`);
-                    await Tasks.cancel(id, parseInt(current_balance));
-                    return true;
-                }
-            }
-
-            if (is_manual) {
-                if (parseInt(current_balance) < parseInt(amount)) {
-                    console.log(`⚠️  Insufficient balance: Has ${current_balance}, needs ${amount}`);
-                    await Tasks.cancel(id, parseInt(current_balance));
-                    return true;
-                }
-            }
-            console.log('✅ Balance validated');
-
-            // Step 9: Fill redeem form
-            console.log('Step 9: Filling redeem form...');
-            const processed = await this.page.evaluate(({ amount, remark }) => {
-                const iframe = document.querySelector('#Container iframe');
-                if (!iframe) {
-                    console.log('Container iframe not found');
-                    return false;
-                }
-                
-                const iframe_document = iframe.contentWindow.document;
-
-                const amount_input = iframe_document.querySelector('#txtAddGold');
-                const remark_input = iframe_document.querySelector('#txtReason');
-                const button = iframe_document.querySelector('#Button1');
-
-                if (!amount_input) {
-                    console.log('Amount input not found');
-                    return false;
-                }
-                if (!remark_input) {
-                    console.log('Remark input not found');
-                    return false;
-                }
-                if (!button) {
-                    console.log('Submit button not found');
-                    return false;
-                }
-
-                console.log('Setting amount:', amount);
-                console.log('Setting remark:', remark);
-                amount_input.value = amount;
-                remark_input.value = remark;
-                
-                console.log('Clicking submit button');
-                button.click();
-
-                return true;
-            }, { amount, remark });
-
-            if (!processed) {
-                const errorMsg = 'Failed to fill redeem form';
-                console.log('❌', errorMsg);
-                await Tasks.error(id, errorMsg);
-                return false;
-            }
-            console.log('✅ Form submitted');
-
-            // Step 10: Wait for result
-            console.log('Step 10: Waiting for result message...');
-            await this.page.waitForSelector('#mb_con p', { timeout: 30000 });
-
-            const result = await this.page.evaluate(() => {
-                const closeButton = document.querySelector('#Close');
-                if (closeButton) closeButton.click();
-                const messageEl = document.querySelector('#mb_con p');
-                return messageEl ? messageEl.innerText : 'No message found';
-            });
-
-            console.log('Result message:', result);
-
-            await this.page.click("#mb_btn_ok");
-            await new Promise(resolve => setTimeout(resolve, 500));
-
-            // Step 11: Process result
-            console.log('Step 11: Processing result...');
-            if (result === "Confirmed successful") {
-                const newBalance = parseFloat((current_balance - amount).toFixed(2));
-                console.log('✅ SUCCESS! New balance:', newBalance);
-                this.log(`Successfully cashout ${amount} from login ${login}`);
-                
-                // Update database
-                try {
-                    const gameAccount = await GameAccount.findOne({ gameLogin: login });
-                    if (gameAccount) {
-                        await gameAccount.updateBalance(newBalance, id);
-                        console.log('Database updated with new balance');
-                    }
-                } catch (dbError) {
-                    console.log('DB update error:', dbError.message);
-                    this.error(`Error updating balance in DB: ${dbError.message}`);
-                }
-                
-                await Tasks.approve(id, newBalance);
-                
-                // Invalidate admin balance cache
-                this.cache.adminBalance = null;
-                this.cache.adminBalanceTimestamp = null;
-                
-                console.log('✅ REDEEM COMPLETE');
-                return true;
-                
-            } else {
-                if (result === "Sorry, there is not enough gold for the operator!") {
-                    console.log('⚠️  Insufficient operator funds');
-                    await Tasks.cancel(id);
-                } else {
-                    console.log('❌ Unexpected result:', result);
-                }
-                this.log(`Error while cashout ${amount} from login ${login}: ${result}`);
-                await Tasks.error(id, result);
-                return false;
-            }
-
-        } catch (error) {
-            console.log('❌ REDEEM ERROR:', error.message);
-            console.log('Stack:', error.stack);
-            this.error(`Error during redeem: ${error.message}`);
-            
-            // Handle session errors
-            if (error.message.includes('Session closed') || 
-                error.message.includes('Target closed') ||
-                error.message.includes('detached Frame')) {
-                this.browserReady = false;
-                this.initialized = false;
-                await this.reinitialize();
-                return -1;
-            }
-            
-            // Try to recover
-            try {
-                console.log('Attempting to navigate back to store...');
-                await this.page.goto('https://milkywayapp.xyz:8781/Store.aspx', {
-                    waitUntil: 'networkidle2',
-                    timeout: 10000
-                });
-                console.log('Recovery navigation complete');
-            } catch (navError) {
-                console.log('Recovery failed:', navError.message);
-            }
-            
-            return false;
+        } catch (navError) {
+            // Ignore
         }
+        
+        return false;
     }
+}
 
-    async resetPassword({ id, login, password }) {
+async resetPassword({ id, login, password }) {
     console.log('🔴 RESET PASSWORD START:', { id, login, password: '***' });
     
     try {
@@ -2435,17 +2408,15 @@ class MilkyWaysController {
 
         await new Promise(resolve => setTimeout(resolve, 1000));
 
-        // Step 5: Click reset password button
-        console.log('Step 5: Clicking reset password button...');
+        // Step 5: Click reset password button directly
+        console.log('Step 5: Clicking RESET PASSWORD button (index 1)...');
         await this.page.evaluate(() => {
             const iframe = document.querySelector('#frm_main_content');
             const iframe_document = iframe.contentWindow.document;
             const links = iframe_document.querySelectorAll('.btn13');
-            console.log('Found buttons:', links.length);
-            console.log('Clicking button index 2 (reset password)');
-            links[2].click();
-            return true;
+            links[1].click(); // ✅ Direct click - Button[1] = Reset Password
         });
+        console.log('✅ Reset password button clicked');
 
         // Step 6: Wait for reset password dialog
         console.log('Step 6: Waiting for reset password dialog...');

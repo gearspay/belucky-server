@@ -1,5 +1,33 @@
 [
     {
+        "name": "password",
+        "value": "YmVsdWNreTY5",
+        "domain": "agent.gamevault999.com",
+        "path": "/",
+        "expires": 1797336055.833599,
+        "size": 20,
+        "httpOnly": false,
+        "secure": false,
+        "session": false,
+        "priority": "Medium",
+        "sameParty": false,
+        "sourceScheme": "Secure"
+    },
+    {
+        "name": "account",
+        "value": "belucky69",
+        "domain": "agent.gamevault999.com",
+        "path": "/",
+        "expires": 1797336055.832712,
+        "size": 16,
+        "httpOnly": false,
+        "secure": false,
+        "session": false,
+        "priority": "Medium",
+        "sameParty": false,
+        "sourceScheme": "Secure"
+    },
+    {
         "name": "PHPSESSID",
         "value": "cebe0aaac92c561c6e3655d342bf3315",
         "domain": "agent.gamevault999.com",
