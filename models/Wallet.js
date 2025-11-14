@@ -1,4 +1,4 @@
-// models/Wallet.js
+// models/Wallet.js - UPDATED WITH BONUS SYSTEM & PROPER DEDUCTION
 const mongoose = require('mongoose');
 
 const transactionSchema = new mongoose.Schema({
@@ -21,23 +21,34 @@ const transactionSchema = new mongoose.Schema({
         enum: ['pending', 'completed', 'failed', 'cancelled'],
         default: 'pending'
     },
-    // Blockchain transaction hash (for crypto transactions)
+    // ✅ Track if transaction used bonus balance
+    isBonus: {
+        type: Boolean,
+        default: false
+    },
+    // ✅ For game_withdrawal from bonus deposits - track restricted amount
+    bonusRestrictionAmount: {
+        type: Number,
+        default: 0
+    },
+    // ✅ Reference to the game_deposit transaction (for tracking bonus)
+    relatedDepositId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Transaction'
+    },
     txid: {
         type: String,
         sparse: true,
         index: true
     },
-    // External transaction ID from payment gateway
     external_id: {
         type: String,
         sparse: true
     },
-    // Reference to external transaction (like game account transaction)
     referenceId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'GameAccount'
     },
-    // Game-related transaction details
     gameDetails: {
         gameType: String,
         gameLogin: String,
@@ -46,13 +57,10 @@ const transactionSchema = new mongoose.Schema({
             ref: 'GameAccount'
         }
     },
-    // Payment method for deposits/withdrawals
     paymentMethod: {
         type: String,
         enum: ['credit_card', 'bank_transfer', 'crypto', 'paypal', 'game_balance', 'cashapp', 'chime']
     },
-    
-    // ✅ CASHAPP WITHDRAWAL DETAILS
     cashappTag: {
         type: String,
         trim: true
@@ -61,8 +69,6 @@ const transactionSchema = new mongoose.Schema({
         type: String,
         trim: true
     },
-    
-    // ✅ CHIME WITHDRAWAL DETAILS
     chimeTag: {
         type: String,
         trim: true
@@ -71,8 +77,6 @@ const transactionSchema = new mongoose.Schema({
         type: String,
         trim: true
     },
-    
-    // ✅ CRYPTO WITHDRAWAL DETAILS
     cryptoType: {
         type: String,
         enum: ['BTC', 'ETH', 'USDT', 'LTC', 'BNB', 'TRX', null],
@@ -86,27 +90,19 @@ const transactionSchema = new mongoose.Schema({
         type: Number,
         min: 0
     },
-    
-    // For admin tracking
     processedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
     },
     notes: String,
-    
-    // Transaction fees
     fee: {
         type: Number,
         default: 0
     },
-    
-    // Net amount after fees
     netAmount: {
         type: Number,
         required: true
     },
-    
-    // Balance before and after transaction for audit trail
     balanceBefore: {
         type: Number,
         required: true
@@ -115,8 +111,19 @@ const transactionSchema = new mongoose.Schema({
         type: Number,
         required: true
     },
-    
-    // Completion timestamp
+    // ✅ Track bonus balance changes
+    bonusBalanceBefore: {
+        type: Number,
+        default: 0
+    },
+    bonusBalanceAfter: {
+        type: Number,
+        default: 0
+    },
+    metadata: {
+        type: mongoose.Schema.Types.Mixed,
+        default: {}
+    },
     completedAt: {
         type: Date
     }
@@ -136,13 +143,22 @@ const walletSchema = new mongoose.Schema({
         default: 0,
         min: 0
     },
-    // Track pending amounts separately
+    // ✅ Separate bonus balance
+    bonusBalance: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
     pendingBalance: {
         type: Number,
         default: 0
     },
-    // Available balance (balance - pendingBalance)
     availableBalance: {
+        type: Number,
+        default: 0
+    },
+    // ✅ Available bonus balance (calculated, not stored separately in DB but updated in pre-save)
+    availableBonusBalance: {
         type: Number,
         default: 0
     },
@@ -150,13 +166,11 @@ const walletSchema = new mongoose.Schema({
         type: String,
         default: 'USD'
     },
-    // Wallet status
     status: {
         type: String,
         enum: ['active', 'suspended', 'frozen'],
         default: 'active'
     },
-    // Security settings
     dailyWithdrawalLimit: {
         type: Number,
         default: 1000
@@ -165,7 +179,6 @@ const walletSchema = new mongoose.Schema({
         type: Number,
         default: 10000
     },
-    // Track daily/monthly withdrawal amounts
     todayWithdrawn: {
         amount: { type: Number, default: 0 },
         date: { type: Date, default: Date.now }
@@ -175,75 +188,163 @@ const walletSchema = new mongoose.Schema({
         month: { type: Number, default: () => new Date().getMonth() },
         year: { type: Number, default: () => new Date().getFullYear() }
     },
-    // Last transaction timestamp for rate limiting
     lastTransactionAt: {
         type: Date
     },
-    // Transaction history embedded in wallet for quick access
     transactions: [transactionSchema]
 }, {
     timestamps: true
 });
 
-// Indexes for better performance
+// Indexes
 walletSchema.index({ userId: 1 });
 walletSchema.index({ 'transactions.createdAt': -1 });
 walletSchema.index({ 'transactions.type': 1 });
 walletSchema.index({ 'transactions.status': 1 });
-walletSchema.index({ 'transactions.txid': 1 });
-walletSchema.index({ 'transactions.external_id': 1 });
-walletSchema.index({ 'transactions.paymentMethod': 1 }); // ✅ Index for payment method queries
+walletSchema.index({ 'transactions.isBonus': 1 });
+walletSchema.index({ 'transactions.gameDetails.gameAccountId': 1 });
 
-// Virtual for getting available balance
-walletSchema.virtual('calculatedAvailableBalance').get(function() {
-    return Math.max(0, this.balance - this.pendingBalance);
+// Virtual for total available balance
+walletSchema.virtual('totalAvailableBalance').get(function() {
+    return this.availableBalance + this.availableBonusBalance;
 });
 
-// Method to add transaction
+// ✅ Method to add bonus
+walletSchema.methods.addBonus = function(amount, description = 'Bonus added') {
+    const bonusBalanceBefore = this.bonusBalance;
+    const bonusBalanceAfter = bonusBalanceBefore + amount;
+
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`🎁 ADD BONUS`);
+    console.log(`Amount: $${amount}`);
+    console.log(`Before: $${bonusBalanceBefore}`);
+    console.log(`After: $${bonusBalanceAfter}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+
+    const transaction = {
+        type: 'bonus',
+        amount,
+        description,
+        status: 'completed',
+        isBonus: true,
+        netAmount: amount,
+        balanceBefore: this.balance,
+        balanceAfter: this.balance,
+        bonusBalanceBefore,
+        bonusBalanceAfter,
+        completedAt: new Date()
+    };
+
+    this.transactions.push(transaction);
+    this.bonusBalance = bonusBalanceAfter;
+    this.updateAvailableBalance();
+    this.lastTransactionAt = new Date();
+
+    return this.transactions[this.transactions.length - 1];
+};
+
+// ✅ UPDATED: Method to add transaction with proper bonus deduction
 walletSchema.methods.addTransaction = function(transactionData) {
     const balanceBefore = this.balance;
+    const bonusBalanceBefore = this.bonusBalance;
     
-    // Calculate net amount (amount - fees)
     const netAmount = transactionData.netAmount || (transactionData.amount - (transactionData.fee || 0));
     
     let balanceAfter = balanceBefore;
+    let bonusBalanceAfter = bonusBalanceBefore;
     
-    // Update balance based on transaction type
-    if (['deposit', 'game_withdrawal', 'bonus', 'refund'].includes(transactionData.type)) {
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`💳 WALLET TRANSACTION`);
+    console.log(`Type: ${transactionData.type}`);
+    console.log(`Amount: $${transactionData.amount}`);
+    console.log(`Is Bonus: ${transactionData.isBonus ? 'YES ✓' : 'NO ✗'}`);
+    console.log(`Status: ${transactionData.status || 'pending'}`);
+    console.log(`Balance Before: $${balanceBefore}`);
+    console.log(`Bonus Balance Before: $${bonusBalanceBefore}`);
+    
+    // ✅ Update balance based on transaction type
+    if (['deposit', 'game_withdrawal', 'refund'].includes(transactionData.type)) {
+        // These add to REGULAR balance only
         balanceAfter = balanceBefore + netAmount;
+        console.log(`➕ Adding $${netAmount} to REGULAR balance`);
+    } else if (transactionData.type === 'bonus') {
+        // Bonus type adds to BONUS balance
+        bonusBalanceAfter = bonusBalanceBefore + netAmount;
+        console.log(`➕ Adding $${netAmount} to BONUS balance`);
     } else if (['withdrawal', 'game_deposit'].includes(transactionData.type)) {
-        balanceAfter = Math.max(0, balanceBefore - transactionData.amount);
+        // ✅ CRITICAL: Check if using bonus balance for game_deposit
+        if (transactionData.type === 'game_deposit' && transactionData.isBonus === true) {
+            // Deduct from BONUS balance
+            bonusBalanceAfter = Math.max(0, bonusBalanceBefore - transactionData.amount);
+            console.log(`➖ Deducting $${transactionData.amount} from BONUS balance`);
+            console.log(`   Bonus Balance After: $${bonusBalanceAfter}`);
+        } else {
+            // Deduct from REGULAR balance
+            balanceAfter = Math.max(0, balanceBefore - transactionData.amount);
+            console.log(`➖ Deducting $${transactionData.amount} from REGULAR balance`);
+            console.log(`   Balance After: $${balanceAfter}`);
+        }
     }
+    
+    console.log(`Final Balance After: $${balanceAfter}`);
+    console.log(`Final Bonus Balance After: $${bonusBalanceAfter}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     const transaction = {
         ...transactionData,
         netAmount,
         balanceBefore,
         balanceAfter,
+        bonusBalanceBefore,
+        bonusBalanceAfter,
         status: transactionData.status || 'pending'
     };
     
     this.transactions.push(transaction);
     
-    // Update wallet balance only if transaction is completed
+    // ✅ Update wallet balances IMMEDIATELY if transaction is completed
     if (transaction.status === 'completed') {
         this.balance = balanceAfter;
+        this.bonusBalance = bonusBalanceAfter;
         this.updateAvailableBalance();
         
-        // Set completion timestamp if not already set
         if (!transaction.completedAt) {
             transaction.completedAt = new Date();
         }
+        
+        console.log(`✅ Wallet balances updated (completed):`);
+        console.log(`   Regular Balance: $${this.balance}`);
+        console.log(`   Bonus Balance: $${this.bonusBalance}`);
+        console.log(`   Available Balance: $${this.availableBalance}`);
+        console.log(`   Available Bonus Balance: $${this.availableBonusBalance}`);
     } else if (transaction.status === 'pending' && 
                ['withdrawal', 'game_deposit'].includes(transactionData.type)) {
-        // Lock pending withdrawal amounts
-        this.pendingBalance += transactionData.amount;
-        this.updateAvailableBalance();
+        // Lock pending amounts (only from regular balance)
+        if (!transactionData.isBonus) {
+            this.pendingBalance += transactionData.amount;
+            this.updateAvailableBalance();
+            console.log(`⏳ Locked $${transactionData.amount} as pending (regular balance)`);
+        } else {
+            console.log(`⏳ Pending bonus transaction - no lock needed`);
+        }
     }
     
     this.lastTransactionAt = new Date();
     
     return this.transactions[this.transactions.length - 1];
+};
+
+// ✅ Method to get last deposit for a game account
+walletSchema.methods.getLastGameDeposit = function(gameAccountId) {
+    const deposits = this.transactions
+        .filter(t => 
+            t.type === 'game_deposit' && 
+            t.status === 'completed' &&
+            t.gameDetails?.gameAccountId?.toString() === gameAccountId.toString()
+        )
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    
+    return deposits.length > 0 ? deposits[0] : null;
 };
 
 // Method to update transaction status
@@ -254,43 +355,74 @@ walletSchema.methods.updateTransactionStatus = function(transactionId, status, n
     }
     
     const oldStatus = transaction.status;
-    const balanceBefore = this.balance;
     
     transaction.status = status;
     if (notes) transaction.notes = notes;
     
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`🔄 UPDATE TRANSACTION STATUS`);
+    console.log(`Transaction ID: ${transactionId}`);
+    console.log(`Old Status: ${oldStatus}`);
+    console.log(`New Status: ${status}`);
+    console.log(`Type: ${transaction.type}`);
+    console.log(`Amount: $${transaction.amount}`);
+    console.log(`Is Bonus: ${transaction.isBonus ? 'YES' : 'NO'}`);
+    
     // Handle balance updates based on status change
     if (oldStatus === 'pending' && status === 'completed') {
-        // Complete pending transaction
         if (['deposit', 'game_withdrawal', 'bonus', 'refund'].includes(transaction.type)) {
-            this.balance += transaction.netAmount;
+            if (transaction.type === 'bonus') {
+                this.bonusBalance += transaction.netAmount;
+                console.log(`➕ Added $${transaction.netAmount} to bonus balance`);
+            } else {
+                this.balance += transaction.netAmount;
+                console.log(`➕ Added $${transaction.netAmount} to regular balance`);
+            }
         }
         
-        // Remove from pending if it was a withdrawal/game_deposit
         if (['withdrawal', 'game_deposit'].includes(transaction.type)) {
-            this.pendingBalance = Math.max(0, this.pendingBalance - transaction.amount);
+            if (!transaction.isBonus) {
+                this.pendingBalance = Math.max(0, this.pendingBalance - transaction.amount);
+                console.log(`🔓 Released $${transaction.amount} from pending`);
+            }
         }
         
-        // Set completion timestamp
         transaction.completedAt = new Date();
     } else if (oldStatus === 'pending' && ['failed', 'cancelled'].includes(status)) {
-        // Cancel pending transaction - refund the amount
         if (['withdrawal', 'game_deposit'].includes(transaction.type)) {
-            this.pendingBalance = Math.max(0, this.pendingBalance - transaction.amount);
-            // Balance was already deducted, so we don't need to add it back
+            if (transaction.isBonus) {
+                // Refund to bonus balance
+                this.bonusBalance += transaction.amount;
+                console.log(`↩️  Refunded $${transaction.amount} to bonus balance`);
+            } else {
+                // Release from pending and refund to regular balance
+                this.pendingBalance = Math.max(0, this.pendingBalance - transaction.amount);
+                console.log(`↩️  Released $${transaction.amount} from pending (cancelled/failed)`);
+            }
         }
     }
     
-    // Update balance after in transaction record
     transaction.balanceAfter = this.balance;
+    transaction.bonusBalanceAfter = this.bonusBalance;
     this.updateAvailableBalance();
+    
+    console.log(`✅ Updated balances:`);
+    console.log(`   Regular: $${this.balance}`);
+    console.log(`   Bonus: $${this.bonusBalance}`);
+    console.log(`   Available: $${this.availableBalance}`);
+    console.log(`   Available Bonus: $${this.availableBonusBalance}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     return transaction;
 };
 
-// Method to update available balance
+// ✅ UPDATED: Method to update available balances
 walletSchema.methods.updateAvailableBalance = function() {
+    // Regular balance minus pending
     this.availableBalance = Math.max(0, this.balance - this.pendingBalance);
+    
+    // Bonus balance is ALWAYS fully available (no pending lock for bonus)
+    this.availableBonusBalance = Math.max(0, this.bonusBalance);
 };
 
 // Method to check if withdrawal is allowed
@@ -299,13 +431,11 @@ walletSchema.methods.canWithdraw = function(amount) {
     const currentMonth = today.getMonth();
     const currentYear = today.getFullYear();
     
-    // Reset daily counter if new day
     if (this.todayWithdrawn.date.toDateString() !== today.toDateString()) {
         this.todayWithdrawn.amount = 0;
         this.todayWithdrawn.date = today;
     }
     
-    // Reset monthly counter if new month
     if (this.monthlyWithdrawn.month !== currentMonth || 
         this.monthlyWithdrawn.year !== currentYear) {
         this.monthlyWithdrawn.amount = 0;
@@ -327,11 +457,8 @@ walletSchema.methods.canWithdraw = function(amount) {
 
 // Method to process withdrawal
 walletSchema.methods.processWithdrawal = function(amount) {
-    const today = new Date();
-    
     this.todayWithdrawn.amount += amount;
     this.monthlyWithdrawn.amount += amount;
-    
     return true;
 };
 
@@ -349,6 +476,7 @@ walletSchema.methods.getTransactionSummary = function(days = 30) {
         totalWithdrawals: 0,
         totalGameDeposits: 0,
         totalGameWithdrawals: 0,
+        totalBonusAdded: 0,
         transactionCount: recentTransactions.length,
         netFlow: 0
     };
@@ -356,10 +484,12 @@ walletSchema.methods.getTransactionSummary = function(days = 30) {
     recentTransactions.forEach(t => {
         switch (t.type) {
             case 'deposit':
-            case 'bonus':
             case 'refund':
                 summary.totalDeposits += t.netAmount;
                 summary.netFlow += t.netAmount;
+                break;
+            case 'bonus':
+                summary.totalBonusAdded += t.netAmount;
                 break;
             case 'withdrawal':
                 summary.totalWithdrawals += t.amount;
@@ -379,7 +509,7 @@ walletSchema.methods.getTransactionSummary = function(days = 30) {
     return summary;
 };
 
-// ✅ Method to get withdrawal details by transaction ID
+// Method to get withdrawal details
 walletSchema.methods.getWithdrawalDetails = function(transactionId) {
     const transaction = this.transactions.id(transactionId);
     
@@ -398,7 +528,6 @@ walletSchema.methods.getWithdrawalDetails = function(transactionId) {
         completedAt: transaction.completedAt
     };
     
-    // Add payment method specific details
     if (transaction.paymentMethod === 'cashapp') {
         details.cashappTag = transaction.cashappTag;
         details.cashappName = transaction.cashappName;
@@ -427,7 +556,7 @@ walletSchema.statics.findOrCreateWallet = async function(userId) {
     return wallet;
 };
 
-// Pre-save middleware to ensure data consistency
+// Pre-save middleware
 walletSchema.pre('save', function(next) {
     this.updateAvailableBalance();
     next();

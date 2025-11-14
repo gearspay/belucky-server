@@ -57,6 +57,26 @@ const register = async (req, res) => {
     // Save the new user to the database
     const newUser = await user.save();
 
+    // ✅ AWARD $5 SIGNUP BONUS TO EVERY NEW USER (IN BONUS WALLET)
+    try {
+      const newUserWallet = await Wallet.findOrCreateWallet(newUser._id);
+      newUserWallet.addTransaction({
+        type: 'bonus',
+        amount: 5,
+        description: 'Welcome signup bonus',
+        status: 'completed',
+        isBonus: true,
+        metadata: {
+          source: 'signup_bonus',
+          rewardType: 'welcome_bonus'
+        }
+      });
+      await newUserWallet.save();
+      console.log('✅ $5 signup bonus awarded to new user');
+    } catch (signupBonusError) {
+      console.error('Error awarding signup bonus:', signupBonusError);
+    }
+
     // Handle referral code if provided
     let referralApplied = false;
     let referralCode = null;
@@ -115,23 +135,8 @@ const register = async (req, res) => {
                 }
               });
 
-              // Award welcome bonus to new user
-              try {
-                const referredWallet = await Wallet.findOrCreateWallet(newUser._id);
-                await referredWallet.addTransaction({
-                  type: 'bonus',
-                  amount: newReferral.rewards.referredReward,
-                  description: `Welcome bonus - referred by ${referralTemplate.referrerId.username}`,
-                  status: 'completed',
-                  referenceId: newReferral._id,
-                  metadata: {
-                    source: 'referral_program',
-                    rewardType: 'referred_bonus'
-                  }
-                });
-              } catch (walletError) {
-                console.error('Error awarding welcome bonus:', walletError);
-              }
+              // ✅ NO IMMEDIATE BONUS - Referrer gets rewards later when this user deposits
+              // The referral bonus will be processed by processDepositReferral() in referralController
 
               referralApplied = true;
               referralCode = affiliateUsername.toUpperCase();
@@ -155,12 +160,12 @@ const register = async (req, res) => {
     res.status(201).json({
       success: true,
       message: referralApplied ? 
-        `User created successfully with referral code ${referralCode}! Welcome bonus of $5 added to your wallet.` : 
-        'User Created Successfully',
+        `User created successfully with referral code ${referralCode}! $5 signup bonus added to your wallet.` : 
+        'User created successfully! $5 signup bonus added to your wallet.',
       data: {
         user: userResponse,
         referralApplied,
-        welcomeBonus: referralApplied ? 5 : 0
+        signupBonus: 5
       }
     });
 

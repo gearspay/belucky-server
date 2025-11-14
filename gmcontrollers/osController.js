@@ -947,28 +947,31 @@ class OrionStarsController {
             }
 
             // ✅ CREATE TRANSACTION with BASE amount (what user paid)
-            const transaction = {
-                type: 'recharge',
-                amount: baseAmount, // ✅ Record only the base amount user paid
-                remark,
-                status: 'pending',
-                metadata: {
-                    baseAmount: baseAmount,
-                    bonusAmount: totalAmount - baseAmount,
-                    totalAmount: totalAmount,
-                    note: 'Includes 10% bonus'
-                }
-            };
+            // const transaction = {
+            //     type: 'recharge',
+            //     amount: baseAmount, // ✅ Record only the base amount user paid
+            //     remark,
+            //     status: 'pending',
+            //     metadata: {
+            //         baseAmount: baseAmount,
+            //         bonusAmount: totalAmount - baseAmount,
+            //         totalAmount: totalAmount,
+            //         note: 'Includes 10% bonus'
+            //     }
+            // };
 
-            await gameAccount.addTransaction(transaction);
-            const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
-            console.log(`✅ Transaction created: ${transactionId} with base amount: $${baseAmount}`);
+            // await gameAccount.addTransaction(transaction);
+            // const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
+            // console.log(`✅ Transaction created: ${transactionId} with base amount: $${baseAmount}`);
 
             // ✅ CREATE TASK with TOTAL amount (to recharge in game)
+             const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+            // ✅ CREATE TASK with the unique ID
             const task = {
-                id: transactionId.toString(),
+                id: transactionId, // Use the generated unique ID
                 login: gameLogin,
-                amount: totalAmount, // ✅ Recharge the TOTAL amount (with bonus) in game
+                amount: totalAmount, // Recharge the TOTAL amount in game
                 remark,
                 is_manual: false
             };

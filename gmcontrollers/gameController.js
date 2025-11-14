@@ -242,18 +242,26 @@ const getAccountBalance = async (req, res) => {
   }
 };
 
-// Recharge account - Uses specific game controller
 const rechargeAccount = async (req, res) => {
   try {
     const userId = req.user.userId;
     const { slug, accountId } = req.params;
-    const { amount, remark } = req.body;
+    const { amount, remark, isBonus } = req.body; // ✅ Accept isBonus flag
 
-    // Validation
-    if (!amount || amount <= 0) {
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`📥 RECHARGE REQUEST RECEIVED`);
+    console.log(`User: ${userId}`);
+    console.log(`Account: ${accountId}`);
+    console.log(`Amount: $${amount}`);
+    console.log(`Is Bonus: ${isBonus}`);
+    console.log(`Remark: ${remark}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+
+    // ✅ Validate integer
+    if (!amount || amount <= 0 || !Number.isInteger(amount)) {
       return res.status(400).json({
         success: false,
-        message: 'Valid amount is required (must be greater than 0)'
+        message: 'Amount must be a positive whole number'
       });
     }
 
@@ -266,7 +274,8 @@ const rechargeAccount = async (req, res) => {
 
     const gameAccount = await GameAccount.findOne({ 
       _id: accountId,
-      userId
+      userId,
+      status: 'active'
     });
 
     if (!gameAccount) {
@@ -278,45 +287,98 @@ const rechargeAccount = async (req, res) => {
 
     const { game, controller } = await loadGameController(slug);
 
-    // ✅ CALCULATE BONUS AMOUNT (10%)
-    const bonusAmount = Math.round(amount * 0.1);
-    const totalAmountWithBonus = amount + bonusAmount;
+    const isBonusDeposit = isBonus === true;
+
+    // ✅ Calculate bonus (always 10% to game)
+    const bonusAmount = Math.floor(amount * 0.1);
+    const totalAmountToGame = amount + bonusAmount;
 
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`RECHARGE REQUEST:`);
-    console.log(`User: ${userId}`);
-    console.log(`Account: ${gameAccount.gameLogin}`);
-    console.log(`Base Amount: $${amount}`);
-    console.log(`Bonus (10%): $${bonusAmount}`);
-    console.log(`Total to Game: $${totalAmountWithBonus}`);
+    console.log(`💰 RECHARGE CALCULATION`);
+    console.log(`Wallet Deduction: $${amount} from ${isBonusDeposit ? 'BONUS' : 'REGULAR'} balance`);
+    console.log(`Game Bonus (10%): +$${bonusAmount}`);
+    console.log(`Total to Game: $${totalAmountToGame}`);
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-    // Call the controller's rechargeAccount method with TOTAL amount (including bonus)
+    // ✅ Create transaction record with isBonus flag IMMEDIATELY
+    const transaction = {
+      type: 'recharge',
+      amount: amount, // Store wallet deduction amount
+      remark: remark || `Deposit $${amount}${isBonusDeposit ? ' (Bonus)' : ''}`,
+      status: 'pending',
+      isBonus: isBonusDeposit, // ✅ CRITICAL: Set the flag NOW
+      metadata: {
+        walletSource: isBonusDeposit ? 'bonus' : 'regular',
+        walletDeduction: amount,
+        gameBonus: bonusAmount,
+        totalToGame: totalAmountToGame,
+        requestedAt: new Date()
+      }
+    };
+
+    await gameAccount.addTransaction(transaction);
+    const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
+
+    console.log(`✅ Game transaction created:`);
+    console.log(`   ID: ${transactionId}`);
+    console.log(`   isBonus: ${isBonusDeposit}`);
+    console.log(`   Amount (wallet): $${amount}`);
+    console.log(`   Amount (to game): $${totalAmountToGame}`);
+
+    // Call game controller
     const result = await controller.rechargeAccount(
       userId, 
       gameAccount.gameLogin, 
-      totalAmountWithBonus, // ✅ Pass amount WITH bonus to game
-      amount, // ✅ Pass base amount for transaction record
-      remark || 'API Recharge'
+      totalAmountToGame,
+      amount,
+      remark || `Deposit $${amount}`
     );
 
     if (result.success) {
+      // ✅ Mark transaction as completed and PRESERVE isBonus
+      const updatedGameAccount = await GameAccount.findById(accountId);
+      const recentTransaction = updatedGameAccount.transactions.id(transactionId);
+      
+      if (recentTransaction) {
+        recentTransaction.status = 'completed';
+        recentTransaction.completedAt = new Date();
+        recentTransaction.processedAt = new Date();
+        recentTransaction.isBonus = isBonusDeposit; // ✅ Re-affirm the flag
+        await updatedGameAccount.save();
+        
+        console.log(`✅ Transaction ${transactionId} marked as completed`);
+        console.log(`   isBonus flag preserved: ${recentTransaction.isBonus}`);
+      }
+
       res.json({
         success: true,
-        message: 'Recharge completed successfully',
+        message: `Recharge completed successfully${isBonusDeposit ? ' (Bonus Balance Used)' : ''}`,
         data: {
           ...result.data,
-          baseAmount: amount,
-          bonusAmount: bonusAmount,
-          totalAmount: totalAmountWithBonus
+          transactionId: recentTransaction?._id,
+          status: 'completed',
+          walletDeduction: amount,
+          gameBonus: bonusAmount,
+          totalToGame: totalAmountToGame,
+          fundedByBonus: isBonusDeposit,
+          isBonus: isBonusDeposit // ✅ Return this to frontend
         }
       });
     } else {
+      const updatedGameAccount = await GameAccount.findById(accountId);
+      const recentTransaction = updatedGameAccount.transactions.id(transactionId);
+      
+      if (recentTransaction) {
+        recentTransaction.status = 'failed';
+        recentTransaction.metadata.failureReason = result.message;
+        await updatedGameAccount.save();
+      }
+      
       throw new Error(result.message || 'Recharge failed');
     }
 
   } catch (error) {
-    console.error('Error processing recharge:', error);
+    console.error('❌ Error processing recharge:', error);
     res.status(400).json({
       success: false,
       message: error.message || 'Error processing recharge'
@@ -330,18 +392,11 @@ const redeemFromAccount = async (req, res) => {
     const { slug, accountId } = req.params;
     const { amount, remark } = req.body;
 
-    // Basic validation
-    if (!amount || amount <= 0) {
+    // ✅ UPDATED: Validate integer
+    if (!amount || amount <= 0 || !Number.isInteger(amount)) {
       return res.status(400).json({
         success: false,
-        message: 'Valid amount is required (must be greater than 0)'
-      });
-    }
-
-    if (amount > 500) {
-      return res.status(400).json({
-        success: false,
-        message: 'Maximum redeem amount is $500'
+        message: 'Amount must be a positive whole number'
       });
     }
 
@@ -357,158 +412,131 @@ const redeemFromAccount = async (req, res) => {
       });
     }
 
-    // CRITICAL VALIDATION: Get last deposit and validate cashout limits
     const lastDeposit = gameAccount.getLastDeposit();
     
     if (!lastDeposit) {
       return res.status(400).json({
         success: false,
-        message: 'No deposit history found. Please deposit first to enable cashout.'
+        message: 'No deposit history found. Please deposit first.'
       });
     }
 
-    // Find applicable cashout rule
     const CashoutRule = require('../models/CashoutRule');
-    const rule = await CashoutRule.findApplicableRule(lastDeposit);
+    const rule = await CashoutRule.findApplicableRule(lastDeposit.amount);
 
     if (!rule) {
       return res.status(400).json({
         success: false,
-        message: `No cashout rule found for deposit amount $${lastDeposit}. Please contact support.`
+        message: `No cashout rule found for deposit $${lastDeposit.amount}`
       });
     }
 
-    // VALIDATE: Check if cashout amount is within limits
     if (amount < rule.cashoutLimits.min) {
       return res.status(400).json({
         success: false,
-        message: `Minimum cashout amount is $${rule.cashoutLimits.min} for your deposit of $${lastDeposit}`
+        message: `Minimum cashout is $${rule.cashoutLimits.min} for your deposit of $${lastDeposit.amount}`
       });
     }
 
     if (amount > rule.cashoutLimits.max) {
       return res.status(400).json({
         success: false,
-        message: `Maximum cashout amount is $${rule.cashoutLimits.max} for your deposit of $${lastDeposit}`
+        message: `Maximum cashout is $${rule.cashoutLimits.max} for your deposit of $${lastDeposit.amount}`
       });
     }
 
-    // VALIDATE: Check if amount exceeds current balance
-    if (amount > gameAccount.balance) {
+    // ✅ UPDATED: Round game balance to integer for comparison
+    const gameBalance = Math.floor(gameAccount.balance);
+    
+    if (amount > gameBalance) {
       return res.status(400).json({
         success: false,
-        message: `Insufficient balance. Available: $${gameAccount.balance.toFixed(2)}`
-      });
-    }
-
-    // Rate limiting: Check for multiple cashout attempts
-    const recentRedeems = gameAccount.transactions.filter(
-      t => t.type === 'redeem' && 
-      t.createdAt > new Date(Date.now() - 5 * 60 * 1000) // Last 5 minutes
-    );
-
-    if (recentRedeems.length >= 3) {
-      return res.status(429).json({
-        success: false,
-        message: 'Too many cashout attempts. Please wait 5 minutes before trying again.'
+        message: `Insufficient balance. Available: $${gameBalance}`
       });
     }
 
     const { game, controller } = await loadGameController(slug);
-
-    // Get FULL game balance to redeem (void all balance)
-    const totalGameBalance = gameAccount.balance;
+    const totalGameBalance = Math.floor(gameAccount.balance); // ✅ Integer
+    const voidedAmount = totalGameBalance - amount;
+    
+    // ✅ UPDATED: Integer calculation for wallet transfer
+    const walletTransferAmount = lastDeposit.isBonus 
+      ? Math.floor(amount * 0.10)  // ✅ 10% rounded down
+      : amount;
     
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`CASHOUT REQUEST:`);
-    console.log(`User: ${userId}`);
-    console.log(`Account: ${gameAccount.gameLogin}`);
+    console.log(`💵 CASHOUT REQUEST`);
     console.log(`Requested Cashout: $${amount}`);
     console.log(`Total Game Balance: $${totalGameBalance}`);
-    console.log(`Will Void: $${(totalGameBalance - amount).toFixed(2)}`);
-    console.log(`Last Deposit: $${lastDeposit}`);
-    console.log(`Cashout Limits: $${rule.cashoutLimits.min} - $${rule.cashoutLimits.max}`);
+    console.log(`Will Void: $${voidedAmount}`);
+    console.log(`Last Deposit: $${lastDeposit.amount} (Bonus: ${lastDeposit.isBonus ? 'YES' : 'NO'})`);
+    console.log(`Wallet Will Receive: $${walletTransferAmount} (${lastDeposit.isBonus ? '10%' : '100%'})`);
+    console.log(`Cashout Limits: $${rule.cashoutLimits.min}-$${rule.cashoutLimits.max}`);
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-    // ✅ CREATE TRANSACTION HERE with cashout amount
     const transaction = {
       type: 'redeem',
-      amount: amount, // ✅ User's cashout amount (what they receive)
+      amount: amount,
       remark: remark || `Cashout $${amount}`,
       status: 'pending',
+      isBonus: lastDeposit.isBonus,
       metadata: {
         totalGameBalance: totalGameBalance,
-        cashoutAmount: amount,
-        willVoid: totalGameBalance - amount
+        requestedCashout: amount,
+        voidedAmount: voidedAmount,
+        walletTransferAmount: walletTransferAmount,
+        transferPercentage: lastDeposit.isBonus ? 10 : 100,
+        lastDepositAmount: lastDeposit.amount,
+        lastDepositWasBonus: lastDeposit.isBonus
       }
     };
 
     await gameAccount.addTransaction(transaction);
     const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
-    console.log('✅ Transaction created:', transactionId, 'with amount:', amount);
 
-    // Call the controller's redeemFromAccount method
     const result = await controller.redeemFromAccount(
       userId, 
       gameAccount.gameLogin, 
-      totalGameBalance, // Full balance to redeem from game
-      amount, // Cashout amount (what user receives)
+      totalGameBalance,
+      amount,
       remark || `Cashout $${amount}`
     );
 
     if (result.success) {
-      // ✅ MARK TRANSACTION AS COMPLETED
       const updatedGameAccount = await GameAccount.findById(accountId);
       const recentTransaction = updatedGameAccount.transactions.id(transactionId);
       
       if (recentTransaction) {
         recentTransaction.status = 'completed';
         recentTransaction.completedAt = new Date();
-        recentTransaction.metadata = {
-          totalRedeemedFromGame: totalGameBalance,
-          cashoutAmount: amount,
-          voidedAmount: totalGameBalance - amount,
-          lastDeposit: lastDeposit,
-          appliedRule: {
-            depositRange: rule.depositRange,
-            cashoutLimits: rule.cashoutLimits
-          },
-          note: 'Full game balance voided, cashout amount transferred to wallet'
-        };
+        recentTransaction.processedAt = new Date();
         await updatedGameAccount.save();
-        
-        console.log(`✓ Redeemed full balance of $${totalGameBalance} from game`);
-        console.log(`✓ Cashout amount: $${amount} to wallet`);
-        console.log(`✓ Voided amount: $${(totalGameBalance - amount).toFixed(2)}`);
-        console.log(`✓ Transaction ${recentTransaction._id} amount: $${recentTransaction.amount}`);
-        console.log(`✓ Transaction marked as completed`);
       }
+
+      console.log(`✅ Cashout completed - Game redeemed: $${totalGameBalance}, Wallet gets: $${walletTransferAmount}`);
 
       res.json({
         success: true,
-        message: 'Cashout completed successfully',
+        message: `Cashout completed successfully${lastDeposit.isBonus ? ' (10% restriction applied)' : ''}`,
         data: {
           ...result.data,
           transactionId: recentTransaction?._id,
           status: 'completed',
-          completedAt: recentTransaction?.completedAt,
           totalRedeemedFromGame: totalGameBalance,
-          cashoutAmount: amount,
-          voidedAmount: totalGameBalance - amount,
-          transactionAmount: amount
+          requestedCashout: amount,
+          voidedAmount: voidedAmount,
+          walletTransferAmount: walletTransferAmount,
+          wasFundedByBonus: lastDeposit.isBonus,
+          transferPercentage: lastDeposit.isBonus ? 10 : 100
         }
       });
     } else {
-      // ✅ MARK TRANSACTION AS FAILED
       const updatedGameAccount = await GameAccount.findById(accountId);
       const recentTransaction = updatedGameAccount.transactions.id(transactionId);
       
       if (recentTransaction) {
         recentTransaction.status = 'failed';
-        recentTransaction.metadata = {
-          ...recentTransaction.metadata,
-          error: result.message || 'Redeem failed'
-        };
+        recentTransaction.metadata.failureReason = result.message;
         await updatedGameAccount.save();
       }
       
@@ -516,14 +544,13 @@ const redeemFromAccount = async (req, res) => {
     }
 
   } catch (error) {
-    console.error('Error processing redeem:', error);
+    console.error('❌ Error processing redeem:', error);
     res.status(400).json({
       success: false,
       message: error.message || 'Error processing redeem'
     });
   }
 };
-
 
 const getCashoutInfo = async (req, res) => {
   try {
@@ -542,8 +569,41 @@ const getCashoutInfo = async (req, res) => {
       });
     }
 
-    // Get last deposit for THIS game account
+    // ✅ Get last deposit
     const lastDeposit = gameAccount.getLastDeposit();
+    
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`📊 CASHOUT INFO DEBUG`);
+    console.log(`Game Account: ${gameAccount.gameLogin}`);
+    console.log(`Account ID: ${accountId}`);
+    console.log(`Current Balance: $${gameAccount.balance}`);
+    console.log(`\n🔍 LAST DEPOSIT DETAILS:`);
+    if (lastDeposit) {
+      console.log(`   Amount: $${lastDeposit.amount}`);
+      console.log(`   Date: ${lastDeposit.date}`);
+      console.log(`   isBonus: ${lastDeposit.isBonus}`);
+      console.log(`   Transaction ID: ${lastDeposit.transactionId}`);
+      console.log(`   Wallet Transaction ID: ${lastDeposit.walletTransactionId}`);
+    } else {
+      console.log(`   ❌ NO DEPOSIT FOUND`);
+    }
+    
+    console.log(`\n📜 ALL RECHARGE TRANSACTIONS:`);
+    const allRecharges = gameAccount.transactions
+      .filter(t => t.type === 'recharge')
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    
+    allRecharges.forEach((t, index) => {
+      console.log(`   ${index + 1}. ID: ${t._id}`);
+      console.log(`      Amount: $${t.amount}`);
+      console.log(`      Status: ${t.status}`);
+      console.log(`      isBonus: ${t.isBonus}`);
+      console.log(`      Created: ${t.createdAt}`);
+      console.log(`      Wallet Tx: ${t.walletTransactionId || 'none'}`);
+      console.log(`      Metadata:`, t.metadata);
+      console.log(`      ---`);
+    });
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     if (!lastDeposit) {
       return res.status(400).json({
@@ -554,29 +614,38 @@ const getCashoutInfo = async (req, res) => {
 
     // Find applicable cashout rule
     const CashoutRule = require('../models/CashoutRule');
-    const rule = await CashoutRule.findApplicableRule(lastDeposit);
+    const rule = await CashoutRule.findApplicableRule(lastDeposit.amount);
 
     if (!rule) {
       return res.status(404).json({
         success: false,
-        message: `No cashout rule found for deposit amount $${lastDeposit}`
+        message: `No cashout rule found for deposit amount $${lastDeposit.amount}`
       });
     }
+
+    console.log(`✅ Cashout Rule Found:`);
+    console.log(`   Min: $${rule.cashoutLimits.min}`);
+    console.log(`   Max: $${rule.cashoutLimits.max}`);
+    console.log(`   Bonus Restriction Applies: ${lastDeposit.isBonus}`);
 
     res.json({
       success: true,
       data: {
-        lastDeposit,
+        lastDeposit: lastDeposit.amount,
+        isBonus: lastDeposit.isBonus,
+        depositDate: lastDeposit.date,
         cashoutLimits: rule.cashoutLimits,
-        currentBalance: gameAccount.balance
+        currentBalance: gameAccount.balance,
+        bonusRestrictionApplies: lastDeposit.isBonus,
+        expectedCashoutPercentage: lastDeposit.isBonus ? 10 : 100
       }
     });
 
   } catch (error) {
-    console.error('Error getting cashout info:', error);
+    console.error('❌ Error getting cashout info:', error);
     res.status(500).json({
       success: false,
-      message: error.message || 'Error retrieving cashout information'
+      message: 'Error retrieving cashout information'
     });
   }
 };
@@ -722,6 +791,41 @@ const getAccountTransactions = async (req, res) => {
         message: 'Game account not found'
       });
     }
+
+    // ✅ ADD THIS DEBUG SECTION:
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📊 GET ACCOUNT TRANSACTIONS DEBUG');
+    console.log(`Account ID: ${accountId}`);
+    console.log(`User ID: ${userId}`);
+    console.log(`Total Transactions in DB: ${gameAccount.transactions.length}`);
+    
+    // Check for duplicates by ID
+    const txIds = gameAccount.transactions.map(t => t._id.toString());
+    const uniqueTxIds = new Set(txIds);
+    
+    if (txIds.length !== uniqueTxIds.size) {
+      console.error('🚨 DUPLICATE TRANSACTION IDs IN DATABASE!');
+      console.log('Total:', txIds.length);
+      console.log('Unique:', uniqueTxIds.size);
+    }
+    
+    console.log('\n🔍 ALL TRANSACTIONS:');
+    gameAccount.transactions
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .forEach((t, i) => {
+        console.log(`\n  ${i + 1}. Transaction ID: ${t._id}`);
+        console.log(`     Type: ${t.type}`);
+        console.log(`     Amount: $${t.amount}`);
+        console.log(`     Remark: ${t.remark || 'none'}`);
+        console.log(`     Status: ${t.status}`);
+        console.log(`     isBonus: ${t.isBonus}`);
+        console.log(`     Created: ${t.createdAt}`);
+        console.log(`     Wallet TX ID: ${t.walletTransactionId || 'none'}`);
+        if (t.metadata && Object.keys(t.metadata).length > 0) {
+          console.log(`     Metadata:`, t.metadata);
+        }
+      });
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     const startIndex = (page - 1) * limit;
     const endIndex = startIndex + parseInt(limit);

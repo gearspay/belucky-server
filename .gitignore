@@ -24,6 +24,9 @@ gmcontrollers/localgv.json
 controllers/sessionfirekirin.json
 controllers/cookiesfirekirin.json
 controllers/localfirekirin.json
+gmcontrollers/sessiongv.json
+gmcontrollers/cookiesgv.json
+gmcontrollers/cookiesos.json
 
 # Any other session/auth files in any directory
 session*.json

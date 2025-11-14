@@ -1,8 +1,8 @@
-// controllers/walletController.js
+// controllers/walletController.js - UPDATED WITH BONUS LOGIC
+
 const Wallet = require('../models/Wallet');
 const GameAccount = require('../models/GameAccount');
 const PaymentMethod = require('../models/PaymentMethod');
-
 
 // Get user's wallet information
 const getWallet = async (req, res) => {
@@ -11,19 +11,14 @@ const getWallet = async (req, res) => {
         
         const wallet = await Wallet.findOrCreateWallet(userId);
         
-        // ✅ REMOVED wallet.updateAvailableBalance() - trust DB value
-        
-        // Calculate pending withdrawals
         const pendingWithdrawals = wallet.transactions
             .filter(t => t.status === 'pending' && t.type === 'withdrawal')
             .reduce((sum, t) => sum + t.amount, 0);
         
-        // Calculate pending deposits
         const pendingDeposits = wallet.transactions
             .filter(t => t.status === 'pending' && t.type === 'deposit')
             .reduce((sum, t) => sum + t.amount, 0);
         
-        // Get recent transactions (last 10)
         const recentTransactions = wallet.transactions
             .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
             .slice(0, 10);
@@ -35,10 +30,13 @@ const getWallet = async (req, res) => {
             message: 'Wallet retrieved successfully',
             data: {
                 balance: wallet.balance,
-                availableBalance: wallet.availableBalance, // Use DB value directly
-                pendingBalance: wallet.pendingBalance, // Use DB value directly
-                pendingWithdrawals: pendingWithdrawals,
-                pendingDeposits: pendingDeposits,
+                bonusBalance: wallet.bonusBalance, // ✅ NEW
+                availableBalance: wallet.availableBalance,
+                availableBonusBalance: wallet.availableBonusBalance, // ✅ NEW
+                totalAvailableBalance: wallet.availableBalance + wallet.availableBonusBalance, // ✅ NEW
+                pendingBalance: wallet.pendingBalance,
+                pendingWithdrawals,
+                pendingDeposits,
                 currency: wallet.currency,
                 status: wallet.status,
                 limits: {
@@ -61,7 +59,7 @@ const getWallet = async (req, res) => {
     }
 };
 
-// Get wallet balance only (for header)
+// Get wallet balance only
 const getWalletBalance = async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -72,7 +70,10 @@ const getWalletBalance = async (req, res) => {
             success: true,
             data: {
                 balance: wallet.balance,
+                bonusBalance: wallet.bonusBalance, // ✅ NEW
                 availableBalance: wallet.availableBalance,
+                availableBonusBalance: wallet.availableBonusBalance, // ✅ NEW
+                totalAvailableBalance: wallet.availableBalance + wallet.availableBonusBalance, // ✅ NEW
                 pendingBalance: wallet.pendingBalance,
                 currency: wallet.currency
             }
@@ -87,13 +88,57 @@ const getWalletBalance = async (req, res) => {
     }
 };
 
-// Add funds to wallet (deposit) - WITH DYNAMIC FEES
+// ✅ NEW: Add bonus to wallet
+const addBonus = async (req, res) => {
+    try {
+        const userId = req.user.userId;
+        const { amount, description } = req.body;
+        
+        if (!amount || amount <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid amount is required (must be greater than 0)'
+            });
+        }
+        
+        const wallet = await Wallet.findOrCreateWallet(userId);
+        
+        if (wallet.status !== 'active') {
+            return res.status(403).json({
+                success: false,
+                message: 'Wallet is not active'
+            });
+        }
+        
+        const transaction = wallet.addBonus(amount, description || 'Bonus added to wallet');
+        await wallet.save();
+        
+        res.json({
+            success: true,
+            message: 'Bonus added successfully',
+            data: {
+                transactionId: transaction._id,
+                amount,
+                bonusBalance: wallet.bonusBalance,
+                availableBonusBalance: wallet.availableBonusBalance
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error adding bonus:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error adding bonus'
+        });
+    }
+};
+
+// Deposit funds
 const depositFunds = async (req, res) => {
     try {
         const userId = req.user.userId;
         const { amount, paymentMethod, description, external_id } = req.body;
         
-        // Validation
         if (!amount || amount <= 0) {
             return res.status(400).json({
                 success: false,
@@ -124,7 +169,6 @@ const depositFunds = async (req, res) => {
             });
         }
         
-        // Get dynamic deposit fee from payment method config
         let depositFeePercent = 0;
         try {
             const paymentMethodConfig = await PaymentMethod.findOne({ 
@@ -138,23 +182,19 @@ const depositFunds = async (req, res) => {
             }
         } catch (error) {
             console.error('Error fetching payment method config:', error);
-            // Continue with 0% fee as fallback
         }
         
-        // Calculate dynamic fee
         const feeAmount = (amount * depositFeePercent) / 100;
         
-        // Add deposit transaction with external_id for crypto payments
         const transactionData = {
             type: 'deposit',
             amount,
             description: description || 'Wallet deposit',
             paymentMethod,
             status: 'pending',
-            fee: feeAmount // Dynamic fee based on payment method
+            fee: feeAmount
         };
         
-        // Store external_id for crypto transactions
         if (paymentMethod === 'crypto' && external_id) {
             transactionData.external_id = external_id.toString();
         }
@@ -187,8 +227,7 @@ const depositFunds = async (req, res) => {
     }
 };
 
-// controllers/adminDataController.js - UPDATED getTransactions function
-
+// Withdraw funds
 const withdrawFunds = async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -204,10 +243,7 @@ const withdrawFunds = async (req, res) => {
             chimeTag,
             chimeName
         } = req.body;
-
-        console.log(req.body)
         
-        // Validation
         if (!amount || amount <= 0) {
             return res.status(400).json({
                 success: false,
@@ -222,25 +258,24 @@ const withdrawFunds = async (req, res) => {
             });
         }
 
-        // Validate payment method specific details
         if (paymentMethod === 'cashapp' && !cashappTag) {
             return res.status(400).json({
                 success: false,
-                message: 'CashApp tag is required for CashApp withdrawals'
+                message: 'CashApp tag is required'
             });
         }
 
         if (paymentMethod === 'chime' && (!chimeTag || !chimeName)) {
             return res.status(400).json({
                 success: false,
-                message: 'Chime tag and full name are required for Chime withdrawals'
+                message: 'Chime tag and full name are required'
             });
         }
 
         if (paymentMethod === 'crypto' && (!cryptoType || !cryptoAddress)) {
             return res.status(400).json({
                 success: false,
-                message: 'Crypto type and address are required for crypto withdrawals'
+                message: 'Crypto type and address are required'
             });
         }
         
@@ -249,11 +284,10 @@ const withdrawFunds = async (req, res) => {
         if (wallet.status !== 'active') {
             return res.status(403).json({
                 success: false,
-                message: 'Wallet is not active. Please contact support.'
+                message: 'Wallet is not active'
             });
         }
         
-        // Get dynamic withdrawal fee from payment method config
         let withdrawalFeePercent = 0;
         try {
             const paymentMethodConfig = await PaymentMethod.findOne({ 
@@ -269,11 +303,9 @@ const withdrawFunds = async (req, res) => {
             console.error('Error fetching payment method config:', error);
         }
         
-        // Calculate dynamic fee
         const feeAmount = (amount * withdrawalFeePercent) / 100;
         const netAmount = amount - feeAmount;
         
-        // Check availableBalance
         if (wallet.availableBalance < amount) {
             return res.status(400).json({
                 success: false,
@@ -281,7 +313,6 @@ const withdrawFunds = async (req, res) => {
             });
         }
         
-        // Check withdrawal limits
         const canWithdraw = wallet.canWithdraw(amount);
         
         if (!canWithdraw.allowed) {
@@ -296,18 +327,16 @@ const withdrawFunds = async (req, res) => {
             });
         }
         
-        // Build transaction data with payment method specific details
         const transactionData = {
             type: 'withdrawal',
             amount,
             description: description || 'Wallet withdrawal',
             paymentMethod,
-            status: 'pending', // ✅ ALL withdrawals start as pending
+            status: 'pending',
             fee: feeAmount,
             netAmount: netAmount
         };
 
-        // Add CashApp details if CashApp withdrawal
         if (paymentMethod === 'cashapp') {
             transactionData.cashappTag = cashappTag;
             if (cashappName) {
@@ -315,13 +344,11 @@ const withdrawFunds = async (req, res) => {
             }
         }
 
-        // Add Chime details if Chime withdrawal
         if (paymentMethod === 'chime') {
             transactionData.chimeTag = chimeTag;
             transactionData.chimeFullName = chimeName;
         }
 
-        // ✅ Add Crypto details if crypto withdrawal (SAVE FOR ADMIN APPROVAL)
         if (paymentMethod === 'crypto') {
             transactionData.cryptoType = cryptoType;
             transactionData.withdrawalAddress = cryptoAddress;
@@ -330,16 +357,10 @@ const withdrawFunds = async (req, res) => {
             }
         }
         
-        // Add withdrawal transaction (ALWAYS PENDING)
         const transaction = wallet.addTransaction(transactionData);
-        
-        // Update withdrawal tracking
         wallet.processWithdrawal(amount);
         
         await wallet.save();
-
-        // ✅ REMOVED: No automatic crypto processing here
-        // Admin will approve in dashboard and it will process automatically
 
         res.json({
             success: true,
@@ -370,163 +391,287 @@ const withdrawFunds = async (req, res) => {
             message: 'Error processing withdrawal'
         });
     }
-}
-
-// Transfer funds to game account
-const transferToGame = async (req, res) => {
-    try {
-        const userId = req.user.userId;
-        const { gameAccountId, amount, description } = req.body;
-        
-        // Validation
-        if (!amount || amount <= 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'Valid amount is required (must be greater than 0)'
-            });
-        }
-        
-        if (!gameAccountId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Game account ID is required'
-            });
-        }
-        
-        // Verify game account belongs to user
-        const gameAccount = await GameAccount.findOne({ _id: gameAccountId, userId });
-        if (!gameAccount) {
-            return res.status(404).json({
-                success: false,
-                message: 'Game account not found'
-            });
-        }
-        
-        const wallet = await Wallet.findOrCreateWallet(userId);
-        
-        if (wallet.availableBalance < amount) {
-            return res.status(400).json({
-                success: false,
-                message: 'Insufficient wallet balance'
-            });
-        }
-        
-        // Add game deposit transaction to wallet
-        const transaction = wallet.addTransaction({
-            type: 'game_deposit',
-            amount,
-            description: description || `Transfer to ${gameAccount.gameType} - ${gameAccount.gameLogin}`,
-            status: 'completed',
-            gameDetails: {
-                gameType: gameAccount.gameType,
-                gameLogin: gameAccount.gameLogin,
-                gameAccountId: gameAccount._id
-            },
-            referenceId: gameAccount._id
-        });
-        
-        await wallet.save();
-        
-        // Here you would trigger the actual game account recharge
-        // For now, we'll just return success
-        
-        res.json({
-            success: true,
-            message: 'Transfer to game account completed successfully',
-            data: {
-                transactionId: transaction._id,
-                amount,
-                gameAccount: {
-                    gameType: gameAccount.gameType,
-                    gameLogin: gameAccount.gameLogin
-                },
-                newWalletBalance: wallet.balance,
-                availableBalance: wallet.availableBalance
-            }
-        });
-        
-    } catch (error) {
-        console.error('Error transferring to game:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error transferring funds to game account'
-        });
-    }
 };
 
-// Transfer funds from game account
-const transferFromGame = async (req, res) => {
-    try {
-        const userId = req.user.userId;
-        const { gameAccountId, amount, description } = req.body;
-        
-        // Validation
-        if (!amount || amount <= 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'Valid amount is required (must be greater than 0)'
-            });
-        }
-        
-        if (!gameAccountId) {
-            return res.status(400).json({
-                success: false,
-                message: 'Game account ID is required'
-            });
-        }
-        
-        // Verify game account belongs to user
-        const gameAccount = await GameAccount.findOne({ _id: gameAccountId, userId });
-        if (!gameAccount) {
-            return res.status(404).json({
-                success: false,
-                message: 'Game account not found'
-            });
-        }
-        
-        const wallet = await Wallet.findOrCreateWallet(userId);
-        
-        // Add game withdrawal transaction to wallet as COMPLETED
-        const transaction = wallet.addTransaction({
-            type: 'game_withdrawal',
-            amount,
-            description: description || `Transfer from ${gameAccount.gameType} - ${gameAccount.gameLogin}`,
-            status: 'completed',
-            gameDetails: {
-                gameType: gameAccount.gameType,
-                gameLogin: gameAccount.gameLogin,
-                gameAccountId: gameAccount._id
-            },
-            referenceId: gameAccount._id,
-            completedAt: new Date()
+// ✅ UPDATED: Transfer to game (with bonus support)
+const transferToGame = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { gameAccountId, amount, description, useBonus } = req.body;
+    
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`💸 TRANSFER TO GAME REQUEST`);
+    console.log(`User: ${userId}`);
+    console.log(`Game Account: ${gameAccountId}`);
+    console.log(`Amount: $${amount}`);
+    console.log(`Use Bonus: ${useBonus}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    
+    if (!amount || amount <= 0 || !Number.isInteger(amount)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amount must be a positive whole number'
+      });
+    }
+    
+    if (!gameAccountId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Game account ID is required'
+      });
+    }
+    
+    const gameAccount = await GameAccount.findOne({ _id: gameAccountId, userId });
+    if (!gameAccount) {
+      return res.status(404).json({
+        success: false,
+        message: 'Game account not found'
+      });
+    }
+    
+    const wallet = await Wallet.findOrCreateWallet(userId);
+    
+    console.log(`📊 WALLET STATE BEFORE:`);
+    console.log(`   Regular Balance: $${wallet.balance}`);
+    console.log(`   Bonus Balance: $${wallet.bonusBalance}`);
+    console.log(`   Available Balance: $${wallet.availableBalance}`);
+    console.log(`   Available Bonus Balance: $${wallet.availableBonusBalance}`);
+    
+    const isBonus = useBonus === true;
+    
+    // Check appropriate balance
+    if (isBonus) {
+      console.log(`✅ Checking BONUS balance: $${wallet.availableBonusBalance} >= $${amount}?`);
+      if (wallet.availableBonusBalance < amount) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient bonus balance. Available: $${wallet.availableBonusBalance.toFixed(2)}`
         });
-        
-        await wallet.save();
-        
-        res.json({
-            success: true,
-            message: 'Transfer from game account completed successfully',
-            data: {
-                transactionId: transaction._id,
-                amount,
-                status: 'completed',
-                gameAccount: {
-                    gameType: gameAccount.gameType,
-                    gameLogin: gameAccount.gameLogin
-                },
-                newWalletBalance: wallet.balance,
-                availableBalance: wallet.availableBalance,
-                completedAt: transaction.completedAt
-            }
+      }
+    } else {
+      console.log(`✅ Checking REGULAR balance: $${wallet.availableBalance} >= $${amount}?`);
+      if (wallet.availableBalance < amount) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient balance. Available: $${wallet.availableBalance.toFixed(2)}`
         });
-        
-    } catch (error) {
-        console.error('Error transferring from game:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Error transferring funds from game account'
+      }
+    }
+    
+    // ✅ Create wallet transaction
+    const transaction = wallet.addTransaction({
+      type: 'game_deposit',
+      amount,
+      description: description || `Transfer to ${gameAccount.gameType}${isBonus ? ' (Bonus)' : ''}`,
+      status: 'completed',
+      isBonus: isBonus, // ✅ CRITICAL
+      gameDetails: {
+        gameType: gameAccount.gameType,
+        gameLogin: gameAccount.gameLogin,
+        gameAccountId: gameAccount._id
+      },
+      referenceId: gameAccount._id,
+      metadata: {
+        sourceBalance: isBonus ? 'bonus' : 'regular',
+        timestamp: new Date()
+      }
+    });
+    
+    await wallet.save();
+    
+    console.log(`✅ Wallet transaction created: ${transaction._id}`);
+    console.log(`📊 WALLET STATE AFTER:`);
+    console.log(`   Regular Balance: $${wallet.balance}`);
+    console.log(`   Bonus Balance: $${wallet.bonusBalance}`);
+    console.log(`   Available Balance: $${wallet.availableBalance}`);
+    console.log(`   Available Bonus Balance: $${wallet.availableBonusBalance}`);
+    
+    // ✅ IMPROVED: Find and link to game transaction
+    // Look for the most recent recharge that matches amount and doesn't have wallet link yet
+    const recentRecharges = gameAccount.transactions
+      .filter(t => 
+        t.type === 'recharge' && 
+        t.amount === amount &&
+        !t.walletTransactionId && // Not yet linked
+        (new Date().getTime() - new Date(t.createdAt).getTime() < 60000) // Created within last 60 seconds
+      )
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    
+    if (recentRecharges.length > 0) {
+      const lastRecharge = recentRecharges[0];
+      
+      console.log(`🔗 Found matching game recharge transaction:`);
+      console.log(`   Transaction ID: ${lastRecharge._id}`);
+      console.log(`   Created: ${lastRecharge.createdAt}`);
+      console.log(`   Current isBonus: ${lastRecharge.isBonus}`);
+      console.log(`   Updating to isBonus: ${isBonus}`);
+      
+      // ✅ Update the game transaction
+      lastRecharge.isBonus = isBonus;
+      lastRecharge.walletTransactionId = transaction._id;
+      
+      // ✅ Ensure metadata exists
+      if (!lastRecharge.metadata) {
+        lastRecharge.metadata = {};
+      }
+      lastRecharge.metadata.walletSource = isBonus ? 'bonus' : 'regular';
+      lastRecharge.metadata.linkedAt = new Date();
+      
+      await gameAccount.save();
+      
+      console.log(`✅ Game transaction updated successfully`);
+      console.log(`   Final isBonus value: ${lastRecharge.isBonus}`);
+      
+      // ✅ VERIFY the update by re-fetching
+      const verifyAccount = await GameAccount.findById(gameAccountId);
+      const verifyTransaction = verifyAccount.transactions.id(lastRecharge._id);
+      console.log(`🔍 VERIFICATION:`);
+      console.log(`   Transaction ${lastRecharge._id} isBonus: ${verifyTransaction.isBonus}`);
+      
+    } else {
+      console.warn(`⚠️  Could not find recent matching recharge transaction`);
+      console.warn(`   Looking for: amount=$${amount}, within last 60 seconds`);
+      console.warn(`   Available recharges:`);
+      gameAccount.transactions
+        .filter(t => t.type === 'recharge')
+        .slice(0, 5)
+        .forEach(t => {
+          console.warn(`     - ID: ${t._id}, Amount: $${t.amount}, Created: ${t.createdAt}, Linked: ${!!t.walletTransactionId}`);
         });
     }
+    
+    res.json({
+      success: true,
+      message: `Transfer completed${isBonus ? ' (using bonus balance)' : ''}`,
+      data: {
+        transactionId: transaction._id,
+        amount,
+        isBonus,
+        balanceType: isBonus ? 'bonus' : 'regular',
+        newWalletBalance: wallet.balance,
+        newBonusBalance: wallet.bonusBalance,
+        availableBalance: wallet.availableBalance,
+        availableBonusBalance: wallet.availableBonusBalance
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error transferring to game:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error transferring funds'
+    });
+  }
+};
+
+// ✅ UPDATED: Transfer from game (with 10% bonus rule)
+const transferFromGame = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { gameAccountId, amount, description } = req.body;
+    
+    // ✅ UPDATED: Validate integer
+    if (!amount || amount <= 0 || !Number.isInteger(amount)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amount must be a positive whole number'
+      });
+    }
+    
+    if (!gameAccountId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Game account ID is required'
+      });
+    }
+    
+    const gameAccount = await GameAccount.findOne({ _id: gameAccountId, userId });
+    if (!gameAccount) {
+      return res.status(404).json({
+        success: false,
+        message: 'Game account not found'
+      });
+    }
+    
+    const wallet = await Wallet.findOrCreateWallet(userId);
+    
+    const lastDeposit = gameAccount.getLastDeposit();
+    const wasFundedByBonus = lastDeposit ? lastDeposit.isBonus : false;
+    
+    // ✅ UPDATED: Integer calculation
+    let actualWalletAmount = amount;
+    let restrictedAmount = 0;
+    
+    if (wasFundedByBonus) {
+      actualWalletAmount = Math.floor(amount * 0.10); // ✅ Round down
+      restrictedAmount = amount - actualWalletAmount;
+    }
+    
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`💰 TRANSFER FROM GAME`);
+    console.log(`Requested Transfer: $${amount}`);
+    console.log(`Last Deposit Was Bonus-Funded: ${wasFundedByBonus ? 'YES ✓' : 'NO ✗'}`);
+    if (wasFundedByBonus) {
+      console.log(`⚠️  10% RESTRICTION APPLIED`);
+      console.log(`   → Wallet Receives: $${actualWalletAmount} (10%)`);
+      console.log(`   → Restricted: $${restrictedAmount} (90%)`);
+    } else {
+      console.log(`✅ NO RESTRICTION - Wallet Receives: $${actualWalletAmount} (100%)`);
+    }
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    
+    const transaction = wallet.addTransaction({
+      type: 'game_withdrawal',
+      amount: actualWalletAmount,
+      description: description || `Transfer from ${gameAccount.gameType}${wasFundedByBonus ? ' (10% Bonus Restriction)' : ''}`,
+      status: 'completed',
+      isBonus: false,
+      bonusRestrictionAmount: restrictedAmount,
+      relatedDepositId: lastDeposit?.transactionId,
+      gameDetails: {
+        gameType: gameAccount.gameType,
+        gameLogin: gameAccount.gameLogin,
+        gameAccountId: gameAccount._id
+      },
+      referenceId: gameAccount._id,
+      completedAt: new Date(),
+      metadata: {
+        requestedAmount: amount,
+        actualWalletAmount: actualWalletAmount,
+        restrictedAmount: restrictedAmount,
+        wasFundedByBonus: wasFundedByBonus,
+        transferPercentage: wasFundedByBonus ? 10 : 100
+      }
+    });
+    
+    await wallet.save();
+    
+    console.log(`✅ Wallet updated: +$${actualWalletAmount} (restricted: $${restrictedAmount})`);
+    
+    res.json({
+      success: true,
+      message: wasFundedByBonus 
+        ? `Transfer completed (10% restriction: $${actualWalletAmount} added to wallet, $${restrictedAmount} restricted)`
+        : `Transfer completed ($${actualWalletAmount} added to wallet)`,
+      data: {
+        transactionId: transaction._id,
+        requestedAmount: amount,
+        actualWalletAmount: actualWalletAmount,
+        restrictedAmount: restrictedAmount,
+        wasFundedByBonus: wasFundedByBonus,
+        transferPercentage: wasFundedByBonus ? 10 : 100,
+        newWalletBalance: wallet.balance,
+        availableBalance: wallet.availableBalance
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error transferring from game:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error transferring funds'
+    });
+  }
 };
 
 // Get transaction history
@@ -539,7 +684,6 @@ const getTransactionHistory = async (req, res) => {
         
         let transactions = [...wallet.transactions];
         
-        // Apply filters
         if (type) {
             transactions = transactions.filter(t => t.type === type);
         }
@@ -556,10 +700,8 @@ const getTransactionHistory = async (req, res) => {
             transactions = transactions.filter(t => new Date(t.createdAt) <= new Date(endDate));
         }
         
-        // Sort by date (newest first)
         transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
         
-        // Pagination
         const startIndex = (page - 1) * limit;
         const endIndex = startIndex + parseInt(limit);
         const paginatedTransactions = transactions.slice(startIndex, endIndex);
@@ -591,7 +733,7 @@ const getTransactionHistory = async (req, res) => {
     }
 };
 
-// Get single transaction details
+// Get single transaction
 const getTransaction = async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -670,20 +812,17 @@ const updateWalletSettings = async (req, res) => {
     }
 };
 
-// Get recent winners (last 10 game withdrawals) - WITH GAME IMAGES
+// Get recent winners
 const getRecentWinners = async (req, res) => {
     try {
         const User = require('../models/User');
-        const GameAccount = require('../models/GameAccount');
         const Game = require('../models/Game');
         
-        // Get all wallets with game_withdrawal transactions
         const wallets = await Wallet.find({
             'transactions.type': 'game_withdrawal',
             'transactions.status': 'completed'
         }).populate('userId', 'username email');
         
-        // Collect all game_withdrawal transactions with user info
         const allWinners = [];
         
         for (const wallet of wallets) {
@@ -703,19 +842,16 @@ const getRecentWinners = async (req, res) => {
             allWinners.push(...gameWithdrawals);
         }
         
-        // Sort by date (newest first) and get top 10
         const topWinners = allWinners
             .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
             .slice(0, 10);
         
-        // Fetch game details and images for each winner
         const winnersWithImages = await Promise.all(
             topWinners.map(async (winner) => {
                 let gameName = winner.gameType;
                 let gameImage = null;
                 
                 try {
-                    // If we have gameAccountId, use it to get the actual game
                     if (winner.gameAccountId) {
                         const gameAccount = await GameAccount.findById(winner.gameAccountId)
                             .populate({
@@ -725,14 +861,11 @@ const getRecentWinners = async (req, res) => {
                         
                         if (gameAccount && gameAccount.gameId) {
                             const game = gameAccount.gameId;
-                            // ✅ Use displayName, name, or title (in that order)
                             gameName = game.displayName || game.name || game.title || winner.gameType;
-                            // ✅ Use image field
                             gameImage = game.image || null;
                         }
                     }
                     
-                    // Fallback: try to find game by gameType/shortcode if gameAccount lookup failed
                     if (!gameImage) {
                         const game = await Game.findOne({
                             $or: [
@@ -755,8 +888,8 @@ const getRecentWinners = async (req, res) => {
                 return {
                     name: maskUsername(winner.username),
                     amount: winner.amount,
-                    game: gameName, // ✅ Actual game name (e.g., "Juwa", "Fire Kirin")
-                    gameImage: gameImage, // ✅ Game image path from image field
+                    game: gameName,
+                    gameImage: gameImage,
                     gameLogin: winner.gameLogin,
                     timestamp: winner.createdAt
                 };
@@ -783,7 +916,6 @@ const getRecentWinners = async (req, res) => {
     }
 };
 
-// Helper function to mask username
 const maskUsername = (username) => {
     if (!username || username.length < 3) return 'User ***';
     
@@ -796,6 +928,7 @@ const maskUsername = (username) => {
 module.exports = {
     getWallet,
     getWalletBalance,
+    addBonus, // ✅ NEW
     depositFunds,
     withdrawFunds,
     transferToGame,

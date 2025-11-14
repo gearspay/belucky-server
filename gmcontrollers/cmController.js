@@ -861,30 +861,33 @@ class CashMachineController {
                     throw new Error('Game account not found');
                 }
 
-                const transaction = {
-                    type: 'recharge',
-                    amount: baseAmount,
-                    remark,
-                    status: 'pending',
-                    metadata: {
-                        baseAmount: baseAmount,
-                        bonusAmount: totalAmount - baseAmount,
-                        totalAmount: totalAmount,
-                        note: 'Includes 10% bonus'
-                    }
-                };
+                // const transaction = {
+                //     type: 'recharge',
+                //     amount: baseAmount,
+                //     remark,
+                //     status: 'pending',
+                //     metadata: {
+                //         baseAmount: baseAmount,
+                //         bonusAmount: totalAmount - baseAmount,
+                //         totalAmount: totalAmount,
+                //         note: 'Includes 10% bonus'
+                //     }
+                // };
 
-                await gameAccount.addTransaction(transaction);
-                const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
-                console.log(`✅ Transaction created: ${transactionId} with base amount: $${baseAmount}`);
+                // await gameAccount.addTransaction(transaction);
+                // const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
+                // console.log(`✅ Transaction created: ${transactionId} with base amount: $${baseAmount}`);
 
-                const task = {
-                    id: transactionId.toString(),
-                    login: gameLogin,
-                    amount: totalAmount,
-                    remark,
-                    is_manual: false
-                };
+                  const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+            // ✅ CREATE TASK with the unique ID
+            const task = {
+                id: transactionId, // Use the generated unique ID
+                login: gameLogin,
+                amount: totalAmount, // Recharge the TOTAL amount in game
+                remark,
+                is_manual: false
+            };
 
                 console.log(`Calling recharge with total amount: $${totalAmount}`);
                 const result = await this.recharge(task);
