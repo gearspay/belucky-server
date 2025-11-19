@@ -1,4 +1,5 @@
-// controllers/JuwaController.js - COMPLETE REWRITTEN FIXED VERSION
+// controllers/JuwaController.js - REFACTORED WITHOUT QUEUE SYSTEM
+// PART 1 OF 3 - Lines 1-500
 const Puppeteer = require('puppeteer');
 const Captcha = require('../lib/captcha.js');
 const { writeFileSync, readFileSync, existsSync, readdirSync, rmSync } = require('fs');
@@ -10,154 +11,212 @@ const path = require('path');
 const axios = require('axios');
 
 class JuwaController {
-    constructor() {
-        this.browser = null;
-        this.page = null;
-        this.cookies = null;
-        this.authorized = false;
-        this.logger = Logger('Juwa');
-        this.gameType = 'juwa';
-        this.initialized = false;
-        this.agentCredentials = null;
-        
-        this.keepAlive = true;
-        this.lastActivity = Date.now();
-        this.activityTimeout = 5 * 60 * 1000;
-        
-        this.cache = {
-            adminBalance: null,
-            adminBalanceTimestamp: null,
-            cacheDuration: 30 * 1000
-        };
+   constructor() {
+    this.browser = null;
+    this.page = null;
+    this.cookies = null;
+    this.authorized = false;
+    this.logger = Logger('Juwa');
+    this.gameType = 'juwa';
+    this.initialized = false;
+    this.agentCredentials = null;
+    
+    this.keepAlive = true;
+    this.lastActivity = Date.now();
+    this.activityTimeout = 5 * 60 * 1000;
+    
+    this.cache = {
+        adminBalance: null,
+        adminBalanceTimestamp: null,
+        cacheDuration: 30 * 1000
+    };
 
-        // QUEUE SYSTEM
-        this.requestQueue = [];
-        this.isProcessingQueue = false;
-        this.maxConcurrentRequests = 1;
+    // INITIALIZATION STATE
+    this.isInitializing = false;
+    this.initializationPromise = null;
+    this.browserReady = false;
 
-        // INITIALIZATION STATE
-        this.isInitializing = false;
-        this.initializationPromise = null;
-        this.browserReady = false;
+    // AUTHORIZATION STATE
+    this.isAuthorizing = false;
+    this.authorizationPromise = null;
+    this.authorizationInProgress = false;
 
-        // AUTHORIZATION STATE
-        this.isAuthorizing = false;
-        this.authorizationPromise = null;
-        this.authorizationInProgress = false;
+    // RETRY LIMIT TRACKING
+    this.authRetryCount = 0;
+    this.maxAuthRetries = 3;
+    this.lastAuthAttempt = null;
+    this.authResetInterval = 5 * 60 * 1000; // Reset counter after 5 minutes
 
-        // SESSION MANAGEMENT
-        this.sessionTimeout = null;
-        this.lastSuccessfulOperation = Date.now();
-        this.consecutiveErrors = 0;
-        this.maxConsecutiveErrors = 3;
+    // SESSION MANAGEMENT
+    this.sessionTimeout = null;
+    this.lastSuccessfulOperation = Date.now();
+    this.consecutiveErrors = 0;
+    this.maxConsecutiveErrors = 3;
+    this.consecutiveMonitorFailures = 0;
+    this.maxMonitorFailures = 5;
 
-        this.loadAgentCredentials().catch(err => {
-            this.error(`Failed to load credentials on startup: ${err.message}`);
+    // ⭐ AUTO-INITIALIZE - Start browser when controller is created
+    this.loadAgentCredentials()
+        .then(() => {
+            this.log('Credentials loaded, starting browser initialization...');
+            return this.initialize();
+        })
+        .then(() => {
+            this.log('✅ Browser initialized and ready');
+        })
+        .catch(err => {
+            this.error(`Failed to initialize on startup: ${err.message}`);
         });
 
-        this.startSessionMonitor();
+    this.startSessionMonitor();
 
-        process.on('unhandledRejection', e => {
-            this.logger.error(e);
-        });
+    process.on('unhandledRejection', e => {
+        this.logger.error(e);
+    });
 
-        process.on('uncaughtException', e => {
-            this.logger.error(e);
-        });
-    }
+    process.on('uncaughtException', e => {
+        this.logger.error(e);
+    });
+}
 
     log(log) { this.logger.log(`${log}`) }
     error(log) { this.logger.error(`${log}`) }
+
+    // RESET AUTH RETRY COUNTER IF ENOUGH TIME HAS PASSED
+    resetAuthRetryIfNeeded() {
+        if (this.lastAuthAttempt && 
+            Date.now() - this.lastAuthAttempt > this.authResetInterval) {
+            this.log('Resetting auth retry counter after timeout');
+            this.authRetryCount = 0;
+        }
+    }
 
     // ========================================
     // HTTP REQUEST HELPER
     // ========================================
 
-    async makeRequest({ url, method, body }) {
-        try {
-            const sessionPath = path.join(__dirname, 'sessionjuwa.json');
-            
-            if (!existsSync(sessionPath)) {
-                this.error('Session file not found. Need to login first.');
+   async makeRequest({ url, method, body }) {
+    try {
+        const sessionPath = path.join(__dirname, 
+            this.gameType === 'juwa' ? 'sessionjuwa.json' : 'sessiongv.json'
+        );
+        
+        // ⭐ If no session during startup, wait for initialization
+        if (!existsSync(sessionPath)) {
+            // Check if we're initializing
+            if (this.isInitializing || this.isAuthorizing) {
+                this.log('Session not ready yet, waiting for initialization...');
+                
+                // Wait for initialization to complete
+                if (this.initializationPromise) {
+                    await this.initializationPromise;
+                }
+                
+                // Wait for authorization to complete
+                if (this.authorizationPromise) {
+                    await this.authorizationPromise;
+                }
+                
+                // Wait a bit for session file to be written
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                
+                // Check if session file exists now
+                if (!existsSync(sessionPath)) {
+                    this.error('Session file still not found after initialization');
+                    return {
+                        code: 401,
+                        status: 401,
+                        msg: 'Session not found'
+                    };
+                }
+                
+                // ✅ Session file now exists, continue to make the request
+                this.log('✅ Session file ready after waiting, proceeding with request...');
+            } else {
+                this.error('Session file not found and not initializing. Need to login first.');
                 return {
                     code: 401,
                     status: 401,
                     msg: 'Session not found'
                 };
             }
+        }
 
-            const buffer = readFileSync(sessionPath);
-            const json = buffer.toString();
-            const session_details = JSON.parse(json);
+        // ⭐ Read session file (this code runs for both cases now)
+        const buffer = readFileSync(sessionPath);
+        const json = buffer.toString();
+        const session_details = JSON.parse(json);
 
-            if (!session_details.token) {
-                this.error('No token found in session file');
-                return {
-                    code: 401,
-                    status: 401,
-                    msg: 'Token not found'
-                };
-            }
+        if (!session_details.token) {
+            this.error('No token found in session file');
+            return {
+                code: 401,
+                status: 401,
+                msg: 'Token not found'
+            };
+        }
 
-            // Parse the token (it's stored as a JSON string in sessionStorage)
-            let token = session_details.token;
+        // ⭐ For Juwa, handle JSON parsing of token
+        let token = session_details.token;
+        if (this.gameType === 'juwa') {
             try {
                 token = JSON.parse(session_details.token);
             } catch (e) {
-                // If it's already a string (not JSON), use it as-is
                 token = session_details.token;
             }
+        }
 
-            const response = await axios({
-                url,
-                method,
-                headers: {
-                    "Authorization": `Bearer ${token}`,
-                    "Content-Type": "application/json"
-                },
-                data: body,
-                validateStatus: () => true
-            });
+        // ⭐ Make the actual HTTP request
+        const response = await axios({
+            url,
+            method,
+            headers: {
+                "Authorization": `Bearer ${token}`,
+                "Content-Type": "application/json"
+            },
+            data: body,
+            validateStatus: () => true
+        });
 
-            this.log(`${method} ${url} - Status: ${response.status}`);
+        this.log(`${method} ${url} - Status: ${response.status}`);
 
-            if (response.data) {
-                return response.data;
-            }
+        if (response.data) {
+            return response.data;
+        }
 
+        return {
+            code: response.status,
+            status: response.status,
+            msg: response.statusText || 'No response data'
+        };
+
+    } catch (error) {
+        this.error(`Request error: ${error.message}`);
+        
+        if (error.response) {
+            this.error(`Status: ${error.response.status}, Message: ${error.response.statusText}`);
             return {
-                code: response.status,
-                status: response.status,
-                msg: response.statusText || 'No response data'
+                code: error.response.status,
+                status: error.response.status,
+                msg: error.response.data?.msg || error.response.statusText
             };
-
-        } catch (error) {
-            this.error(`Request error: ${error.message}`);
-            
-            if (error.response) {
-                this.error(`Status: ${error.response.status}, Message: ${error.response.statusText}`);
-                return {
-                    code: error.response.status,
-                    status: error.response.status,
-                    msg: error.response.data?.msg || error.response.statusText
-                };
-            } else if (error.request) {
-                this.error('No response received from server');
-                return {
-                    code: 500,
-                    status: 500,
-                    msg: 'No response from server'
-                };
-            } else {
-                this.error(`Setup error: ${error.message}`);
-                return {
-                    code: 500,
-                    status: 500,
-                    msg: error.message
-                };
-            }
+        } else if (error.request) {
+            this.error('No response received from server');
+            return {
+                code: 500,
+                status: 500,
+                msg: 'No response from server'
+            };
+        } else {
+            this.error(`Setup error: ${error.message}`);
+            return {
+                code: 500,
+                status: 500,
+                msg: error.message
+            };
         }
     }
+}
 
     // ========================================
     // SESSION MONITORING
@@ -170,8 +229,19 @@ class JuwaController {
             const timeSinceLastActivity = Date.now() - this.lastSuccessfulOperation;
             
             if (timeSinceLastActivity > this.activityTimeout) {
+                if (this.consecutiveMonitorFailures >= this.maxMonitorFailures) {
+                    this.error(`Session monitor disabled after ${this.maxMonitorFailures} consecutive failures. Manual restart required.`);
+                    return;
+                }
+                
                 this.log('Session timeout detected, reinitializing...');
-                await this.reinitialize();
+                try {
+                    await this.reinitialize();
+                    this.consecutiveMonitorFailures = 0;
+                } catch (error) {
+                    this.consecutiveMonitorFailures++;
+                    this.error(`Reinitialize failed (${this.consecutiveMonitorFailures}/${this.maxMonitorFailures}): ${error.message}`);
+                }
             }
         }, 60000);
     }
@@ -185,101 +255,16 @@ class JuwaController {
         this.cache.adminBalance = null;
         this.cache.adminBalanceTimestamp = null;
         
-        try {
-            await this.initialize();
-        } catch (error) {
-            this.error(`Reinitialization failed: ${error.message}`);
-        }
-    }
-
-    // ========================================
-    // QUEUE SYSTEM IMPLEMENTATION
-    // ========================================
-
-    async queueOperation(operationName, operationFunction) {
-        return new Promise((resolve, reject) => {
-            this.requestQueue.push({
-                name: operationName,
-                function: operationFunction,
-                resolve,
-                reject,
-                timestamp: Date.now()
-            });
-            
-            this.log(`📥 Queued: "${operationName}" | Queue length: ${this.requestQueue.length}`);
-            
-            if (this.isInitializing || this.isAuthorizing) {
-                this.log('Browser is initializing or authorizing, queue will be processed after completion');
-                return;
-            }
-            
-            if (!this.isProcessingQueue && this.initialized && this.browserReady && this.authorized) {
-                this.processQueue();
-            } else if (!this.initialized || !this.browserReady) {
-                this.log('Browser not ready, initializing...');
-                this.initialize().catch(err => {
-                    this.error(`Failed to initialize for queued operation: ${err.message}`);
-                });
-            }
-        });
-    }
-
-    async processQueue() {
-    if (this.isProcessingQueue) {
-        this.log('Queue processor already running');
-        return;
-    }
-
-    if (!this.initialized || !this.browserReady || !this.authorized) {
-        this.log(`Not ready to process queue yet (initialized: ${this.initialized}, browserReady: ${this.browserReady}, authorized: ${this.authorized})`);
-        return;
-    }
-
-    // ⭐ ADD THIS CHECK - Prevent race condition
-    if (this.requestQueue.length === 0) {
-        this.log('Queue is empty, nothing to process');
-        return;
-    }
-    
-    this.isProcessingQueue = true;
-    this.log('🚀 Queue processor started');
-    
-    while (this.requestQueue.length > 0) {
-        const task = this.requestQueue.shift();
-        const queueWaitTime = Date.now() - task.timestamp;
-        this.log(`▶️  Processing: "${task.name}" (waited ${queueWaitTime}ms) | Remaining: ${this.requestQueue.length}`);
+        this.authRetryCount = 0;
         
         try {
-            await this.ensureBrowserReady();
-            
-            const startTime = Date.now();
-            const result = await task.function();
-            const executionTime = Date.now() - startTime;
-            
-            this.log(`✅ Completed: "${task.name}" in ${executionTime}ms`);
-            this.lastSuccessfulOperation = Date.now();
-            this.consecutiveErrors = 0;
-            task.resolve(result);
-            
-            await new Promise(resolve => setTimeout(resolve, 500));
-            
+            await this.initialize();
+            this.consecutiveMonitorFailures = 0;
         } catch (error) {
-            this.error(`❌ Failed: "${task.name}" - ${error.message}`);
-            this.consecutiveErrors++;
-            
-            if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
-                this.error(`Too many consecutive errors (${this.consecutiveErrors}), reinitializing...`);
-                await this.reinitialize();
-                this.consecutiveErrors = 0;
-            }
-            
-            task.reject(error);
+            this.error(`Reinitialization failed: ${error.message}`);
+            throw error;
         }
     }
-    
-    this.isProcessingQueue = false;
-    this.log('🏁 Queue processor stopped');
-}
 
     // ========================================
     // BROWSER STATE VALIDATION
@@ -492,21 +477,20 @@ class JuwaController {
 
         this.browserReady = true;
         await this.checkAuthorization();
-    }
+    }// PART 2 OF 3 - Lines 501-1000
+// Paste this AFTER Part 1
 
-   async checkAuthorization() {
+    async checkAuthorization() {
     try {
-        if (this.isAuthorizing) {
-            this.log('Authorization already in progress, waiting...');
-            if (this.authorizationPromise) {
-                await this.authorizationPromise;
-            }
+        // ⭐ FIX: If authorize() is already running, just wait for it
+        if (this.isAuthorizing && this.authorizationPromise) {
+            this.log('Authorization already in progress, skipping check...');
+            await this.authorizationPromise;
             return;
         }
 
         if (!this.page || this.page.isClosed()) {
-            this.log('Page is closed, recreating browser...');
-            await this.createBrowser();
+            this.log('Page is closed, cannot check authorization');
             return;
         }
 
@@ -529,7 +513,6 @@ class JuwaController {
                     }
                 }, session_parsed);
 
-                // ✅ RELOAD AFTER SETTING SESSION STORAGE
                 await this.page.goto('https://ht.juwa777.com/userManagement', {
                     waitUntil: 'domcontentloaded',
                     timeout: 15000
@@ -541,57 +524,46 @@ class JuwaController {
             }
         }
 
-        // ✅ FIX: Wait for EITHER login page OR authenticated content
         this.log('Waiting for page to settle and determine auth state...');
         
         const authState = await Promise.race([
-            // Wait for login form (means not authenticated)
             this.page.waitForSelector('.imgCode', { timeout: 8000 })
                 .then(() => 'login_page')
                 .catch(() => null),
             
-            // Wait for authenticated content (means authenticated)
             this.page.waitForSelector('.el-table, [class*="user-management"]', { timeout: 8000 })
                 .then(() => 'authenticated')
                 .catch(() => null),
             
-            // Fallback timeout
             new Promise(resolve => setTimeout(() => resolve('timeout'), 10000))
         ]);
 
         this.log(`Auth state detected: ${authState}`);
 
-        // ✅ IMPROVED CHECK
         const isLoginPage = await this.page.evaluate(() => {
-            // Check for login timeout dialog
             const timeoutDiv = document.querySelector('div[aria-label="Login timeout"]');
             if (timeoutDiv) {
                 return true;
             }
             
-            // Check if on login page
             if (location.pathname === '/login') {
                 return true;
             }
             
-            // Check if login form exists
             const loginForm = document.querySelector('.imgCode');
             if (loginForm) {
                 return true;
             }
             
-            // Check for user management elements (means we're logged in)
             const userManagement = document.querySelector('.el-table') || 
                                   document.querySelector('[class*="user"]');
             if (userManagement) {
                 return false;
             }
             
-            // If unsure and authState was 'authenticated', trust that
-            return true; // Default to need login if truly unsure
+            return true;
         });
 
-        // ✅ COMBINE RACE RESULT WITH EVALUATION
         const needsLogin = authState === 'login_page' || isLoginPage;
 
         if (needsLogin) {
@@ -605,11 +577,8 @@ class JuwaController {
             this.initialized = true;
             this.browserReady = true;
             
-            if (this.requestQueue.length > 0 && !this.isProcessingQueue) {
-                this.log('Authorization confirmed, starting queue processor...');
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                setImmediate(() => this.processQueue());
-            }
+            // Reset retry counter on successful auth check
+            this.authRetryCount = 0;
             
             return true;
         }
@@ -619,18 +588,14 @@ class JuwaController {
         if (error.message.includes('detached Frame') || 
             error.message.includes('Target closed') ||
             error.message.includes('Session closed')) {
-            this.log('Detected detached frame, recreating browser...');
+            this.log('Detected detached frame, need browser restart');
             this.browserReady = false;
             this.initialized = false;
-            await this.createBrowser();
             return;
         }
         
-        // If check fails, assume need to login
-        if (!this.isAuthorizing) {
-            this.log('Check authorization failed, attempting login...');
-            setTimeout(() => this.authorize(), 3000);
-        }
+        // Don't retry automatically - let it be handled elsewhere
+        this.log('Check authorization failed, will retry on next operation');
     }
 }
 
@@ -651,32 +616,41 @@ class JuwaController {
         }
         
         this.authorized = false;
+        this.authRetryCount = 0;
+        
         await this.authorize();
         return true;
     }
 
-   async authorize() {
-    if (this.authorizationInProgress) {
-        this.log('Authorization already in progress, waiting...');
-        if (this.authorizationPromise) {
-            await this.authorizationPromise;
-            return;
-        }
-        await new Promise(resolve => setTimeout(resolve, 3000));
+    async authorize() {
+    if (this.authorizationInProgress && this.authorizationPromise) {
+        this.log('Authorization already in progress, waiting for it...');
+        await this.authorizationPromise;
         return;
+    }
+
+    // ⭐ CHECK RETRY LIMIT BEFORE STARTING
+    this.resetAuthRetryIfNeeded();
+    
+    if (this.authRetryCount >= this.maxAuthRetries) {
+        this.error(`Max authorization attempts (${this.maxAuthRetries}) reached. Waiting 30 seconds before reset...`);
+        this.authRetryCount = 0;
+        await new Promise(resolve => setTimeout(resolve, 30000));
     }
 
     this.authorizationInProgress = true;
     this.isAuthorizing = true;
+    this.authRetryCount++; // ⭐ Increment retry counter
+    this.lastAuthAttempt = Date.now();
     
     this.authorizationPromise = (async () => {
         try {
-            this.log('Starting authorization...');
+            this.log(`Starting authorization (attempt ${this.authRetryCount}/${this.maxAuthRetries})...`);
             
+            // ⭐ FIX: Just check if page exists, don't call createBrowser
             if (!this.page || this.page.isClosed()) {
-                this.log('Page is invalid, recreating browser...');
-                await this.createBrowser();
-                return;
+                this.log('Page is invalid, cannot authorize');
+                throw new Error('Browser not ready - please initialize first');
             }
 
             await this.page.goto('https://ht.juwa777.com/login', {
@@ -684,7 +658,6 @@ class JuwaController {
                 timeout: 10000
             });
 
-            // ⚡ REDUCED: From 2000ms to 1000ms
             await new Promise(resolve => setTimeout(resolve, 1000));
 
             if (!this.agentCredentials) {
@@ -712,8 +685,6 @@ class JuwaController {
             await this.page.type('#login', this.agentCredentials.username);
             await this.page.type('#password', this.agentCredentials.password);
 
-            // ❌ REMOVED: No delay after typing password
-
             this.log('Waiting for captcha image...');
             await this.page.waitForSelector('.imgCode', { timeout: 5000 });
             
@@ -721,8 +692,6 @@ class JuwaController {
                 const img = document.querySelector('.imgCode');
                 return img && img.complete && img.naturalHeight !== 0;
             }, { timeout: 5000 });
-
-            // ❌ REMOVED: No delay before capturing captcha
 
             const base64Captcha = await this.page.evaluate(() => {
                 const canvas = document.createElement('canvas');
@@ -748,13 +717,9 @@ class JuwaController {
             
             this.log(`Captcha solved: ${captchaValue}`);
 
-            // ⚡ TYPE IMMEDIATELY - No delay!
             await this.page.type('#captcha', captchaValue);
-            
-            // ⚡ CLICK IMMEDIATELY - No delay!
             await this.page.click('button');
 
-            // ⚡ REDUCED: From 3000ms to 1500ms
             await new Promise(resolve => setTimeout(resolve, 1500));
 
             const currentUrl = this.page.url();
@@ -767,35 +732,42 @@ class JuwaController {
 
             if (is_logged_in) {
                 this.authorized = true;
-                this.log('Successfully authorized');
+                this.log('✅ Successfully authorized');
                 
-                // ⚡ REDUCED: From 3000ms to 2000ms
+                // ⭐ RESET RETRY COUNT ON SUCCESS
+                this.authRetryCount = 0;
+                
                 await new Promise(resolve => setTimeout(resolve, 2000));
                 
                 await this.saveCookies();
                 await this.saveSession();
                 
-                // ⚡ REDUCED: From 2000ms to 1000ms
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 
                 this.log('Session and cookies saved, authorization complete');
-                
-                if (this.requestQueue.length > 0 && !this.isProcessingQueue) {
-                    this.log('Starting queue processor...');
-                    // ⚡ IMMEDIATE: No delay before processing queue
-                    setImmediate(() => this.processQueue());
-                }
             } else {
                 const error_message = await this.page.evaluate(() => {
                     const message = document.querySelector('.el-message-box__message p');
                     return message ? message.innerText : 'unknown';
                 });
 
-                this.log(`Failed login: ${error_message}`);
+                this.log(`❌ Failed login: ${error_message}`);
                 
+                // ⭐ CHECK RETRY LIMIT
                 if (error_message.includes('captcha') || error_message === 'unknown') {
-                    this.log('Retrying login in 2 seconds...');
-                    setTimeout(() => this.authorize(), 2000); // ⚡ REDUCED: From 3000ms
+                    if (this.authRetryCount < this.maxAuthRetries) {
+                        this.log(`Retrying login in 2 seconds (attempt ${this.authRetryCount + 1}/${this.maxAuthRetries})...`);
+                        
+                        // ⭐ Clear flags before retry
+                        this.authorizationInProgress = false;
+                        this.isAuthorizing = false;
+                        this.authorizationPromise = null;
+                        
+                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        return await this.authorize();
+                    } else {
+                        throw new Error(`Max retry attempts reached: ${error_message}`);
+                    }
                 } else {
                     throw new Error(`Login failed: ${error_message}`);
                 }
@@ -807,18 +779,34 @@ class JuwaController {
             
             if (error.message.includes('detached Frame') || 
                 error.message.includes('Target closed') ||
-                error.message.includes('Session closed')) {
-                this.log('Browser session lost, recreating...');
+                error.message.includes('Session closed') ||
+                error.message.includes('Browser not ready')) {
+                this.log('Browser session lost or not ready');
                 this.browserReady = false;
                 this.initialized = false;
-                setTimeout(async () => {
-                    await this.createBrowser();
-                }, 5000);
-                return;
+                
+                // ⭐ Clear flags and let initialize handle it
+                this.authorizationInProgress = false;
+                this.isAuthorizing = false;
+                this.authorizationPromise = null;
+                
+                throw error; // Re-throw so makeRequest can handle it
             }
             
-            // ⚡ REDUCED: From 3000ms to 2000ms
-            setTimeout(() => this.authorize(), 2000);
+            // ⭐ CHECK RETRY LIMIT BEFORE RETRYING
+            if (this.authRetryCount < this.maxAuthRetries) {
+                this.log(`Retrying authorization in 2 seconds (attempt ${this.authRetryCount + 1}/${this.maxAuthRetries})...`);
+                this.authorizationInProgress = false;
+                this.isAuthorizing = false;
+                this.authorizationPromise = null;
+                
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                return await this.authorize();
+            } else {
+                this.error(`Max authorization attempts (${this.maxAuthRetries}) reached. Will retry after cooldown.`);
+                this.authRetryCount = 0; // Reset for next attempt
+                throw error;
+            }
         } finally {
             this.authorizationInProgress = false;
             this.isAuthorizing = false;
@@ -888,52 +876,6 @@ class JuwaController {
         }
     }
 
-    async checkQueue() {
-        try {
-            const task = await Tasks.get('juwa');
-
-            if (!task) {
-                return setTimeout(this.checkQueue.bind(this), 5000);
-            }
-
-            console.log('Processing task:', task);
-
-            let task_result = null;
-
-            switch (task.type) {
-                case 'get_balance':
-                    task_result = await this.getBalance(task);
-                    break;
-                case 'get_admin_balance':
-                    task_result = await this.getBalanceAdmin(task);
-                    break;
-                case 'recharge':
-                    task_result = await this.recharge(task);
-                    break;
-                case 'redeem':
-                    task_result = await this.redeem(task);
-                    break;
-                case 'create':
-                    task_result = await this.createAccount(task);
-                    break;
-                case 'reset':
-                    task_result = await this.resetPassword(task);
-                    break;
-                default:
-                    this.error(`Unknown task type: ${task.type}`);
-            }
-
-            if (task_result === -1) {
-                return;
-            }
-
-            return setTimeout(this.checkQueue.bind(this), 5000);
-        } catch (error) {
-            this.error(`Error in checkQueue: ${error.message}`);
-            setTimeout(this.checkQueue.bind(this), 5000);
-        }
-    }
-
     // ========================================
     // HELPER METHODS FOR API CALLS
     // ========================================
@@ -953,88 +895,88 @@ class JuwaController {
     }
 
     async getLoginBalance(login) {
-    try {
-        const response = await this.makeRequest({
-            url: "https://ht.juwa777.com/api/user/userList",
-            method: "POST",
-            body: {
-                limit: 20,
-                locale: "en",
-                order_by: "desc",
-                page: 1,
-                search: login,
-                timezone: "cst",
-                sort_field: "register_time",
-                type: 1
-            }
-        });
+        try {
+            const response = await this.makeRequest({
+                url: "https://ht.juwa777.com/api/user/userList",
+                method: "POST",
+                body: {
+                    limit: 20,
+                    locale: "en",
+                    order_by: "desc",
+                    page: 1,
+                    search: login,
+                    timezone: "cst",
+                    sort_field: "register_time",
+                    type: 1
+                }
+            });
 
-        if (response.code !== 200) {
-            if ([400, 401].includes(response.status)) {
-                await this.reload();
-                return -1;
+            if (response.code !== 200) {
+                if ([400, 401].includes(response.status)) {
+                    await this.reload();
+                    return -1;
+                }
+                
+                this.error(`${response.status}, ${response.msg}`);
+                return false;
             }
-            
-            this.error(`${response.status}, ${response.msg}`);
+
+            for (const user of response.data.list) {
+                if (user.login_name == login) {
+                    return {
+                        balance: user.balance,
+                        user_id: user.user_id,
+                        bonus: user.bonus
+                    };
+                }
+            }
+
+            return false;
+        } catch (error) {
+            this.error(`Error getting login balance: ${error.message}`);
             return false;
         }
-
-        for (const user of response.data.list) {
-            if (user.login_name == login) {
-                return {
-                    balance: user.balance,
-                    user_id: user.user_id,
-                    bonus: user.bonus
-                };
-            }
-        }
-
-        return false;
-    } catch (error) {
-        this.error(`Error getting login balance: ${error.message}`);
-        return false;
     }
-}
 
     async isLoginExist(login) {
-    try {
-        const response = await this.makeRequest({
-            url: "https://ht.juwa777.com/api/user/userList",
-            method: "POST",
-            body: {
-                limit: 20,
-                locale: "en",
-                order_by: "desc",
-                page: 1,
-                search: login,
-                timezone: "cst",
-                sort_field: "register_time",
-                type: 1
-            }
-        });
+        try {
+            const response = await this.makeRequest({
+                url: "https://ht.juwa777.com/api/user/userList",
+                method: "POST",
+                body: {
+                    limit: 20,
+                    locale: "en",
+                    order_by: "desc",
+                    page: 1,
+                    search: login,
+                    timezone: "cst",
+                    sort_field: "register_time",
+                    type: 1
+                }
+            });
 
-        if (response.code !== 200) {
-            if ([400, 401].includes(response.status)) {
-                await this.reload();
-                return -1;
+            if (response.code !== 200) {
+                if ([400, 401].includes(response.status)) {
+                    await this.reload();
+                    return -1;
+                }
+                
+                this.error(`${response.status}, ${response.msg}`);
+                return false;
             }
-            
-            this.error(`${response.status}, ${response.msg}`);
+
+            for (const user of response.data.list) {
+                if (user.login_name == login) {
+                    return true;
+                }
+            }
+
+            return false;
+        } catch (error) {
+            this.error(`Error checking login existence: ${error.message}`);
             return false;
         }
-
-        for (const user of response.data.list) {
-            if (user.login_name == login) {
-                return true;  // ← CHANGED: Return true instead of user object
-            }
-        }
-
-        return false;
-    } catch (error) {
-        this.error(`Error checking login existence: ${error.message}`);
-        return false;
     }
-}
 
     async redeemRecharge({ amount, balance, remark, user_id, type = 1 }) {
         try {
@@ -1068,346 +1010,6 @@ class JuwaController {
         return new Promise((resolve) => setTimeout(resolve, ms, true));
     }
 
-    // ========================================
-    // API METHODS WITH QUEUE
-    // ========================================
-
-    async createGameAccount(userId, game) {
-        return await this.queueOperation('createGameAccount', async () => {
-            try {
-                const generateRandomString = () => {
-                    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-                    let result = '';
-                    for (let i = 0; i < 4; i++) {
-                        result += chars.charAt(Math.floor(Math.random() * chars.length));
-                    }
-                    return result;
-                };
-                
-                const login = `bc${generateRandomString()}_${generateRandomString()}`;
-                const password = `bc${generateRandomString()}_${generateRandomString()}`;
-
-                console.log(`Generated credentials for API - Login: ${login}, Password: ${password}`);
-
-                const gameAccount = new GameAccount({
-                    userId,
-                    gameId: game._id,
-                    gameLogin: login,
-                    gamePassword: password,
-                    status: 'pending',
-                    metadata: {
-                        createdVia: 'api'
-                    }
-                });
-
-                await gameAccount.save();
-
-                const task = {
-                    id: gameAccount._id.toString(),
-                    type: 'create',
-                    login,
-                    password,
-                    userId
-                };
-
-                const result = await this.createAccount(task);
-
-                if (result && result.success) {
-                    gameAccount.status = 'active';
-                    gameAccount.gameLogin = result.login;
-                    gameAccount.gamePassword = result.password;
-                    
-                    if (!gameAccount.metadata) {
-                        gameAccount.metadata = {};
-                    }
-                    gameAccount.metadata.login = result.login;
-                    gameAccount.metadata.password = result.password;
-                    
-                    await gameAccount.save();
-
-                    return {
-                        success: true,
-                        data: {
-                            _id: gameAccount._id,
-                            gameLogin: result.login,
-                            gamePassword: result.password,
-                            gameType: gameAccount.gameType,
-                            status: gameAccount.status
-                        },
-                        message: 'Game account created successfully'
-                    };
-                } else {
-                    gameAccount.status = 'failed';
-                    if (result && result.message) {
-                        if (!gameAccount.metadata) {
-                            gameAccount.metadata = {};
-                        }
-                        gameAccount.metadata.notes = result.message;
-                    }
-                    await gameAccount.save();
-                    throw new Error(result ? result.message : 'Failed to create game account');
-                }
-
-            } catch (error) {
-                this.error(`Error creating game account: ${error.message}`);
-                throw error;
-            }
-        });
-    }
-
-    async getGameBalance(userId, gameLogin) {
-        return await this.queueOperation(`getBalance:${gameLogin}`, async () => {
-            console.log('=== getGameBalance (Queued) ===');
-            console.log('userId:', userId);
-            console.log('gameLogin:', gameLogin);
-            
-            try {
-                // Find by userId and gameLogin only (more flexible)
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin
-                }).sort({ createdAt: -1 });
-
-                if (!gameAccount) {
-                    throw new Error('Game account not found');
-                }
-
-                const userInfo = await this.getLoginBalance(gameLogin);
-
-                if (!userInfo || userInfo === -1) {
-                    return {
-                        success: false,
-                        data: null,
-                        message: 'Failed to retrieve balance from game server'
-                    };
-                }
-
-                const balance = userInfo.balance;
-
-                await gameAccount.updateBalance(balance);
-
-                return {
-                    success: true,
-                    data: {
-                        gameLogin,
-                        balance,
-                        lastCheck: new Date(),
-                        accountId: gameAccount._id
-                    }
-                };
-
-            } catch (error) {
-                this.error(`Error getting balance: ${error.message}`);
-                return {
-                    success: false,
-                    data: null,
-                    message: error.message
-                };
-            }
-        });
-    }
-
-    async rechargeAccount(userId, gameLogin, totalAmount, baseAmount, remark = 'API Recharge') {
-        return await this.queueOperation(`recharge:${gameLogin}:${totalAmount}`, async () => {
-            try {
-                console.log("Recharge (Queued) - Finding game account...");
-                console.log(`Base Amount: ${baseAmount}, Total Amount (with bonus): ${totalAmount}`);
-                
-                // Find by userId and gameLogin only
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin
-                }).sort({ createdAt: -1 });
-
-                if (!gameAccount) {
-                    throw new Error('Game account not found');
-                }
-
-                // const transaction = {
-                //     type: 'recharge',
-                //     amount: baseAmount,
-                //     remark,
-                //     status: 'pending',
-                //     metadata: {
-                //         baseAmount: baseAmount,
-                //         bonusAmount: totalAmount - baseAmount,
-                //         totalAmount: totalAmount,
-                //         note: 'Includes 10% bonus'
-                //     }
-                // };
-
-                // await gameAccount.addTransaction(transaction);
-                // const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
-                // console.log(`✅ Transaction created: ${transactionId} with base amount: ${baseAmount}`);
-
-                 const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-            // ✅ CREATE TASK with the unique ID
-            const task = {
-                id: transactionId, // Use the generated unique ID
-                login: gameLogin,
-                amount: totalAmount, // Recharge the TOTAL amount in game
-                remark,
-                is_manual: false
-            };
-
-                console.log(`Calling recharge with total amount: ${totalAmount}`);
-                const result = await this.recharge(task);
-
-                if (result && result !== -1) {
-                    const updatedGameAccount = await GameAccount.findById(gameAccount._id);
-                    
-                    console.log(`✅ Recharge successful`);
-                    console.log(`   - User paid: ${baseAmount}`);
-                    console.log(`   - Bonus: ${totalAmount - baseAmount}`);
-                    console.log(`   - Total recharged in game: ${totalAmount}`);
-                    console.log(`   - New balance: ${updatedGameAccount.balance}`);
-                    
-                    return {
-                        success: true,
-                        data: {
-                            transactionId,
-                            newBalance: updatedGameAccount.balance,
-                            baseAmount: baseAmount,
-                            bonusAmount: totalAmount - baseAmount,
-                            totalAmount: totalAmount
-                        },
-                        message: 'Recharge completed successfully'
-                    };
-                } else {
-                    throw new Error('Recharge failed');
-                }
-
-            } catch (error) {
-                this.error(`Error processing recharge: ${error.message}`);
-                throw error;
-            }
-        });
-    }
-
-    async redeemFromAccount(userId, gameLogin, totalAmount, cashoutAmount, remark = 'API Redeem') {
-        return await this.queueOperation(`redeem:${gameLogin}:${cashoutAmount}`, async () => {
-            try {
-                console.log('🔵 redeemFromAccount START:', { userId, gameLogin, totalAmount, cashoutAmount, remark });
-                
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin
-                }).sort({ createdAt: -1 });
-
-                if (!gameAccount) {
-                    console.log('❌ Game account not found in database');
-                    throw new Error('Game account not found');
-                }
-                console.log('✅ Game account found:', gameAccount._id);
-
-                if (gameAccount.balance < totalAmount) {
-                    console.log(`❌ Insufficient balance: Has ${gameAccount.balance}, needs ${totalAmount}`);
-                    throw new Error('Insufficient balance');
-                }
-                console.log('✅ Balance sufficient');
-
-                const task = {
-                    id: null,
-                    login: gameLogin,
-                    amount: totalAmount,
-                    remark,
-                    is_manual: true
-                };
-
-                console.log('Calling redeem with task:', task);
-                const result = await this.redeem(task);
-                console.log('Redeem result:', result);
-
-                if (result && result !== -1) {
-                    console.log('✅ Redeem successful, fetching updated balance...');
-                    const updatedGameAccount = await GameAccount.findById(gameAccount._id);
-                    
-                    return {
-                        success: true,
-                        data: {
-                            newBalance: updatedGameAccount.balance
-                        },
-                        message: 'Redeem completed successfully'
-                    };
-                } else {
-                    console.log('❌ Redeem returned false or -1');
-                    throw new Error('Redeem failed');
-                }
-
-            } catch (error) {
-                console.log('❌ redeemFromAccount ERROR:', error.message);
-                this.error(`Error processing redeem: ${error.message}`);
-                throw error;
-            }
-        });
-    }
-
-    async resetAccountPassword(userId, gameLogin, newPassword) {
-        return await this.queueOperation(`resetPassword:${gameLogin}`, async () => {
-            try {
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin
-                }).sort({ createdAt: -1 });
-
-                if (!gameAccount) {
-                    return {
-                        success: false,
-                        message: 'Game account not found'
-                    };
-                }
-
-                const task = {
-                    id: null,
-                    login: gameLogin,
-                    password: newPassword
-                };
-
-                const result = await this.resetPassword(task);
-                
-                if (result && result !== -1) {
-                    return {
-                        success: true,
-                        message: 'Password reset successfully'
-                    };
-                } else {
-                    return {
-                        success: false,
-                        message: 'Password reset failed'
-                    };
-                }
-
-            } catch (error) {
-                this.error(`Error resetting password: ${error.message}`);
-                return {
-                    success: false,
-                    message: error.message || 'Error resetting password'
-                };
-            }
-        });
-    }
-
-    async getAdminBalance() {
-        return await this.queueOperation('getAdminBalance', async () => {
-            if (this.cache.adminBalance !== null && 
-                this.cache.adminBalanceTimestamp && 
-                Date.now() - this.cache.adminBalanceTimestamp < this.cache.cacheDuration) {
-                this.log(`Returning cached admin balance: ${this.cache.adminBalance}`);
-                return this.cache.adminBalance;
-            }
-            
-            const balance = await this._getAdminBalanceCore();
-            
-            if (balance !== false && balance !== -1 && balance !== null) {
-                this.cache.adminBalance = balance;
-                this.cache.adminBalanceTimestamp = Date.now();
-            }
-            
-            return balance;
-        });
-    }
-
     async _getAdminBalanceCore() {
         try {
             const response = await this.makeRequest({
@@ -1433,6 +1035,315 @@ class JuwaController {
             this.error(`Error getting admin balance: ${error.message}`);
             return false;
         }
+    }// PART 3 OF 3 - Lines 1001-End (FINAL)
+// Paste this AFTER Part 2
+
+    // ========================================
+    // API METHODS (WITHOUT QUEUE)
+    // ========================================
+
+    async createGameAccount(userId, game) {
+        try {
+            const generateRandomString = () => {
+                const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+                let result = '';
+                for (let i = 0; i < 4; i++) {
+                    result += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return result;
+            };
+            
+            const login = `bc${generateRandomString()}_${generateRandomString()}`;
+            const password = `bc${generateRandomString()}_${generateRandomString()}`;
+
+            console.log(`Generated credentials for API - Login: ${login}, Password: ${password}`);
+
+            const gameAccount = new GameAccount({
+                userId,
+                gameId: game._id,
+                gameLogin: login,
+                gamePassword: password,
+                status: 'pending',
+                metadata: {
+                    createdVia: 'api'
+                }
+            });
+
+            await gameAccount.save();
+
+            const task = {
+                id: gameAccount._id.toString(),
+                type: 'create',
+                login,
+                password,
+                userId
+            };
+
+            const result = await this.createAccount(task);
+
+            if (result && result.success) {
+                gameAccount.status = 'active';
+                gameAccount.gameLogin = result.login;
+                gameAccount.gamePassword = result.password;
+                
+                if (!gameAccount.metadata) {
+                    gameAccount.metadata = {};
+                }
+                gameAccount.metadata.login = result.login;
+                gameAccount.metadata.password = result.password;
+                
+                await gameAccount.save();
+
+                return {
+                    success: true,
+                    data: {
+                        _id: gameAccount._id,
+                        gameLogin: result.login,
+                        gamePassword: result.password,
+                        gameType: gameAccount.gameType,
+                        status: gameAccount.status
+                    },
+                    message: 'Game account created successfully'
+                };
+            } else {
+                gameAccount.status = 'failed';
+                if (result && result.message) {
+                    if (!gameAccount.metadata) {
+                        gameAccount.metadata = {};
+                    }
+                    gameAccount.metadata.notes = result.message;
+                }
+                await gameAccount.save();
+                throw new Error(result ? result.message : 'Failed to create game account');
+            }
+
+        } catch (error) {
+            this.error(`Error creating game account: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async getGameBalance(userId, gameLogin) {
+        console.log('=== getGameBalance ===');
+        console.log('userId:', userId);
+        console.log('gameLogin:', gameLogin);
+        
+        try {
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin
+            }).sort({ createdAt: -1 });
+
+            if (!gameAccount) {
+                throw new Error('Game account not found');
+            }
+
+            const userInfo = await this.getLoginBalance(gameLogin);
+
+            if (!userInfo || userInfo === -1) {
+                return {
+                    success: false,
+                    data: null,
+                    message: 'Failed to retrieve balance from game server'
+                };
+            }
+
+            const balance = userInfo.balance;
+
+            await gameAccount.updateBalance(balance);
+
+            return {
+                success: true,
+                data: {
+                    gameLogin,
+                    balance,
+                    lastCheck: new Date(),
+                    accountId: gameAccount._id
+                }
+            };
+
+        } catch (error) {
+            this.error(`Error getting balance: ${error.message}`);
+            return {
+                success: false,
+                data: null,
+                message: error.message
+            };
+        }
+    }
+
+    async rechargeAccount(userId, gameLogin, totalAmount, baseAmount, remark = 'API Recharge') {
+        try {
+            console.log("Recharge - Finding game account...");
+            console.log(`Base Amount: ${baseAmount}, Total Amount (with bonus): ${totalAmount}`);
+            
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin
+            }).sort({ createdAt: -1 });
+
+            if (!gameAccount) {
+                throw new Error('Game account not found');
+            }
+
+            const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+            const task = {
+                id: transactionId,
+                login: gameLogin,
+                amount: totalAmount,
+                remark,
+                is_manual: false
+            };
+
+            console.log(`Calling recharge with total amount: ${totalAmount}`);
+            const result = await this.recharge(task);
+
+            if (result && result !== -1) {
+                const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+                
+                console.log(`✅ Recharge successful`);
+                console.log(`   - User paid: ${baseAmount}`);
+                console.log(`   - Bonus: ${totalAmount - baseAmount}`);
+                console.log(`   - Total recharged in game: ${totalAmount}`);
+                console.log(`   - New balance: ${updatedGameAccount.balance}`);
+                
+                return {
+                    success: true,
+                    data: {
+                        transactionId,
+                        newBalance: updatedGameAccount.balance,
+                        baseAmount: baseAmount,
+                        bonusAmount: totalAmount - baseAmount,
+                        totalAmount: totalAmount
+                    },
+                    message: 'Recharge completed successfully'
+                };
+            } else {
+                throw new Error('Recharge failed');
+            }
+
+        } catch (error) {
+            this.error(`Error processing recharge: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async redeemFromAccount(userId, gameLogin, totalAmount, cashoutAmount, remark = 'API Redeem') {
+        try {
+            console.log('🔵 redeemFromAccount START:', { userId, gameLogin, totalAmount, cashoutAmount, remark });
+            
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin
+            }).sort({ createdAt: -1 });
+
+            if (!gameAccount) {
+                console.log('❌ Game account not found in database');
+                throw new Error('Game account not found');
+            }
+            console.log('✅ Game account found:', gameAccount._id);
+
+            if (gameAccount.balance < totalAmount) {
+                console.log(`❌ Insufficient balance: Has ${gameAccount.balance}, needs ${totalAmount}`);
+                throw new Error('Insufficient balance');
+            }
+            console.log('✅ Balance sufficient');
+
+            const task = {
+                id: null,
+                login: gameLogin,
+                amount: totalAmount,
+                remark,
+                is_manual: true
+            };
+
+            console.log('Calling redeem with task:', task);
+            const result = await this.redeem(task);
+            console.log('Redeem result:', result);
+
+            if (result && result !== -1) {
+                console.log('✅ Redeem successful, fetching updated balance...');
+                const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+                
+                return {
+                    success: true,
+                    data: {
+                        newBalance: updatedGameAccount.balance
+                    },
+                    message: 'Redeem completed successfully'
+                };
+            } else {
+                console.log('❌ Redeem returned false or -1');
+                throw new Error('Redeem failed');
+            }
+
+        } catch (error) {
+            console.log('❌ redeemFromAccount ERROR:', error.message);
+            this.error(`Error processing redeem: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async resetAccountPassword(userId, gameLogin, newPassword) {
+        try {
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin
+            }).sort({ createdAt: -1 });
+
+            if (!gameAccount) {
+                return {
+                    success: false,
+                    message: 'Game account not found'
+                };
+            }
+
+            const task = {
+                id: null,
+                login: gameLogin,
+                password: newPassword
+            };
+
+            const result = await this.resetPassword(task);
+            
+            if (result && result !== -1) {
+                return {
+                    success: true,
+                    message: 'Password reset successfully'
+                };
+            } else {
+                return {
+                    success: false,
+                    message: 'Password reset failed'
+                };
+            }
+
+        } catch (error) {
+            this.error(`Error resetting password: ${error.message}`);
+            return {
+                success: false,
+                message: error.message || 'Error resetting password'
+            };
+        }
+    }
+
+    async getAdminBalance() {
+        if (this.cache.adminBalance !== null && 
+            this.cache.adminBalanceTimestamp && 
+            Date.now() - this.cache.adminBalanceTimestamp < this.cache.cacheDuration) {
+            this.log(`Returning cached admin balance: ${this.cache.adminBalance}`);
+            return this.cache.adminBalance;
+        }
+        
+        const balance = await this._getAdminBalanceCore();
+        
+        if (balance !== false && balance !== -1 && balance !== null) {
+            this.cache.adminBalance = balance;
+            this.cache.adminBalanceTimestamp = Date.now();
+        }
+        
+        return balance;
     }
 
     // ========================================
@@ -1443,8 +1354,6 @@ class JuwaController {
         console.log('🔴 GET BALANCE ADMIN START:', { id });
         
         try {
-            await this.ensureBrowserReady();
-            
             const balance = await this._getAdminBalanceCore();
 
             if (balance === false || balance === -1) {
@@ -1470,8 +1379,6 @@ class JuwaController {
         console.log('🔴 CREATE ACCOUNT START:', { id, login, password: '***' });
         
         try {
-            await this.ensureBrowserReady();
-            
             const response = await this.makeRequest({
                 url: "https://ht.juwa777.com/api/user/addUser",
                 method: "POST",
@@ -1574,8 +1481,6 @@ class JuwaController {
         console.log('🔴 RECHARGE START:', { id, login, amount, remark, is_manual });
         
         try {
-            await this.ensureBrowserReady();
-            
             const hasLogin = await this.isLoginExist(login);
             
             if (!hasLogin) {
@@ -1671,8 +1576,6 @@ class JuwaController {
         console.log('🔴 REDEEM START:', { id, login, amount, remark, is_manual });
         
         try {
-            await this.ensureBrowserReady();
-            
             const hasLogin = await this.isLoginExist(login);
         
             if (!hasLogin) {
@@ -1777,8 +1680,6 @@ class JuwaController {
         console.log('🔴 RESET PASSWORD START:', { id, login, password: '***' });
         
         try {
-            await this.ensureBrowserReady();
-            
             const hasLogin = await this.isLoginExist(login);
             
             if (!hasLogin) {
@@ -1837,8 +1738,6 @@ class JuwaController {
 
     async getBalanceAdmin(task) {
         try {
-            await this.ensureBrowserReady();
-            
             const balance = await this._getAdminBalanceCore();
 
             if (balance !== null && !isNaN(balance) && balance !== false && balance !== -1) {
@@ -1864,7 +1763,54 @@ class JuwaController {
         await Tasks.error(task.id, 'Download codes not supported');
         return false;
     }
+
+    async checkQueue() {
+        try {
+            const task = await Tasks.get('juwa');
+
+            if (!task) {
+                return setTimeout(this.checkQueue.bind(this), 5000);
+            }
+
+            console.log('Processing task:', task);
+
+            let task_result = null;
+
+            switch (task.type) {
+                case 'get_balance':
+                    task_result = await this.getBalance(task);
+                    break;
+                case 'get_admin_balance':
+                    task_result = await this.getBalanceAdmin(task);
+                    break;
+                case 'recharge':
+                    task_result = await this.recharge(task);
+                    break;
+                case 'redeem':
+                    task_result = await this.redeem(task);
+                    break;
+                case 'create':
+                    task_result = await this.createAccount(task);
+                    break;
+                case 'reset':
+                    task_result = await this.resetPassword(task);
+                    break;
+                default:
+                    this.error(`Unknown task type: ${task.type}`);
+            }
+
+            if (task_result === -1) {
+                return;
+            }
+
+            return setTimeout(this.checkQueue.bind(this), 5000);
+        } catch (error) {
+            this.error(`Error in checkQueue: ${error.message}`);
+            setTimeout(this.checkQueue.bind(this), 5000);
+        }
+    }
 }
 
+// Export singleton instance
 const juwaController = new JuwaController();
 module.exports = juwaController;

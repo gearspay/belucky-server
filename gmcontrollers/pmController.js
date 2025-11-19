@@ -1,4 +1,5 @@
-// controllers/PandaMasterController.js - FIXED VERSION
+// controllers/PandaMasterController.js - FIXED VERSION (SAME PATTERN AS OS/MW)
+// PART 1 OF 3 - Lines 1-650
 const Puppeteer = require('puppeteer');
 const Captcha = require('../lib/captcha.js');
 const { writeFileSync, readFileSync, existsSync } = require('fs');
@@ -14,7 +15,7 @@ class PandaMasterController {
         this.page = null;
         this.cookies = null;
         this.authorized = false;
-        this.logger = Logger('PandaMaster');
+        this.logger = Logger('Pandamaster');
         this.gameType = 'pm';
         this.initialized = false;
         this.agentCredentials = null;
@@ -29,33 +30,40 @@ class PandaMasterController {
             cacheDuration: 30 * 1000
         };
 
-        // ⭐ QUEUE SYSTEM
+        // QUEUE SYSTEM (NEEDED - All operations use Puppeteer)
         this.requestQueue = [];
         this.isProcessingQueue = false;
         this.maxConcurrentRequests = 1;
 
-        // ⭐ INITIALIZATION STATE
+        // INITIALIZATION STATE
         this.isInitializing = false;
         this.initializationPromise = null;
         this.browserReady = false;
 
-        // ⭐ AUTHORIZATION STATE
+        // AUTHORIZATION STATE
         this.isAuthorizing = false;
         this.authorizationPromise = null;
         this.authorizationInProgress = false;
 
-        // ⭐ SESSION MANAGEMENT
+        // ⭐ RETRY LIMIT TRACKING (PREVENT INFINITE LOOPS)
+        this.authRetryCount = 0;
+        this.maxAuthRetries = 3;
+        this.lastAuthAttempt = null;
+        this.authResetInterval = 5 * 60 * 1000; // Reset counter after 5 minutes
+
+        // SESSION MANAGEMENT
         this.sessionTimeout = null;
         this.lastSuccessfulOperation = Date.now();
         this.consecutiveErrors = 0;
         this.maxConsecutiveErrors = 3;
+        this.consecutiveMonitorFailures = 0; // ⭐ PREVENT MONITOR INFINITE LOOPS
+        this.maxMonitorFailures = 5;
 
         this.loadAgentCredentials().catch(err => {
             this.error(`Failed to load credentials on startup: ${err.message}`);
         });
 
-        // Session timeout checker
-        this.startSessionMonitor();
+        this.startSessionMonitor(); // ⭐ ADD SESSION MONITOR
 
         process.on('unhandledRejection', e => {
             this.logger.error(e);
@@ -69,10 +77,16 @@ class PandaMasterController {
     log(log) { this.logger.log(`${log}`) }
     error(log) { this.logger.error(`${log}`) }
 
-    // ========================================
-    // SESSION MONITORING
-    // ========================================
+    // ⭐ RESET AUTH RETRY COUNTER IF ENOUGH TIME HAS PASSED
+    resetAuthRetryIfNeeded() {
+        if (this.lastAuthAttempt && 
+            Date.now() - this.lastAuthAttempt > this.authResetInterval) {
+            this.log('Resetting auth retry counter after timeout');
+            this.authRetryCount = 0;
+        }
+    }
 
+    // ⭐ SESSION MONITORING (WITH FAILURE LIMIT)
     startSessionMonitor() {
         setInterval(async () => {
             if (!this.initialized || !this.page || !this.browser) return;
@@ -80,10 +94,22 @@ class PandaMasterController {
             const timeSinceLastActivity = Date.now() - this.lastSuccessfulOperation;
             
             if (timeSinceLastActivity > this.activityTimeout) {
+                // ⭐ Check if too many consecutive failures
+                if (this.consecutiveMonitorFailures >= this.maxMonitorFailures) {
+                    this.error(`Session monitor disabled after ${this.maxMonitorFailures} consecutive failures. Manual restart required.`);
+                    return; // ⭐ STOP TRYING - NO INFINITE LOOP
+                }
+                
                 this.log('Session timeout detected, reinitializing...');
-                await this.reinitialize();
+                try {
+                    await this.reinitialize();
+                    this.consecutiveMonitorFailures = 0; // ⭐ Reset on success
+                } catch (error) {
+                    this.consecutiveMonitorFailures++; // ⭐ Increment on failure
+                    this.error(`Reinitialize failed (${this.consecutiveMonitorFailures}/${this.maxMonitorFailures}): ${error.message}`);
+                }
             }
-        }, 60000); // Check every minute
+        }, 60000);
     }
 
     async reinitialize() {
@@ -92,19 +118,22 @@ class PandaMasterController {
         this.browserReady = false;
         this.authorized = false;
         
-        // Clear cache
         this.cache.adminBalance = null;
         this.cache.adminBalanceTimestamp = null;
         
+        this.authRetryCount = 0; // ⭐ Reset retry counter
+        
         try {
             await this.initialize();
+            this.consecutiveMonitorFailures = 0; // ⭐ Reset on successful reinit
         } catch (error) {
             this.error(`Reinitialization failed: ${error.message}`);
+            throw error; // ⭐ Throw so monitor can catch it
         }
     }
 
     // ========================================
-    // QUEUE SYSTEM IMPLEMENTATION (FIXED)
+    // QUEUE SYSTEM - FAST FAIL
     // ========================================
 
     async queueOperation(operationName, operationFunction) {
@@ -119,7 +148,6 @@ class PandaMasterController {
             
             this.log(`📥 Queued: "${operationName}" | Queue length: ${this.requestQueue.length}`);
             
-            // Don't start processing if we're not initialized yet
             if (!this.isProcessingQueue && this.initialized && this.browserReady) {
                 this.processQueue();
             } else if (!this.initialized || !this.browserReady) {
@@ -130,6 +158,11 @@ class PandaMasterController {
                     }
                 }).catch(err => {
                     this.error(`Failed to initialize for queued operation: ${err.message}`);
+                    // ✅ FIX: Reject ALL queued tasks
+                    while (this.requestQueue.length > 0) {
+                        const task = this.requestQueue.shift();
+                        task.reject(new Error('Browser initialization failed'));
+                    }
                 });
             }
         });
@@ -150,32 +183,24 @@ class PandaMasterController {
             this.log(`▶️  Processing: "${task.name}" (waited ${queueWaitTime}ms) | Remaining: ${this.requestQueue.length}`);
             
             try {
-                // Ensure browser is ready before each operation
-                await this.ensureBrowserReady();
+                if (!this.initialized || !this.browserReady || !await this.isBrowserValid()) {
+                    throw new Error('Browser not ready. Please try again.');
+                }
                 
                 const startTime = Date.now();
                 const result = await task.function();
                 const executionTime = Date.now() - startTime;
                 
                 this.log(`✅ Completed: "${task.name}" in ${executionTime}ms`);
-                this.lastSuccessfulOperation = Date.now();
+                this.lastSuccessfulOperation = Date.now(); // ⭐ UPDATE LAST ACTIVITY
                 this.consecutiveErrors = 0;
                 task.resolve(result);
                 
-                // Delay between operations for stability
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                await new Promise(resolve => setTimeout(resolve, 500));
                 
             } catch (error) {
                 this.error(`❌ Failed: "${task.name}" - ${error.message}`);
                 this.consecutiveErrors++;
-                
-                // If too many consecutive errors, reinitialize
-                if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
-                    this.error(`Too many consecutive errors (${this.consecutiveErrors}), reinitializing...`);
-                    await this.reinitialize();
-                    this.consecutiveErrors = 0;
-                }
-                
                 task.reject(error);
             }
         }
@@ -189,42 +214,29 @@ class PandaMasterController {
     // ========================================
 
     async ensureBrowserReady() {
-        // Check if browser exists
         if (!this.browser || !this.page) {
-            this.log('Browser or page missing, reinitializing...');
-            await this.initialize();
-            return;
+            throw new Error('Browser not initialized. Please refresh and try again.');
         }
 
-        // Check if page is closed
         try {
             if (this.page.isClosed()) {
-                this.log('Page is closed, reinitializing...');
-                await this.initialize();
-                return;
+                throw new Error('Browser page closed. Please refresh and try again.');
             }
         } catch (error) {
-            this.log('Error checking page state, reinitializing...');
-            await this.initialize();
-            return;
+            throw new Error('Browser not accessible. Please refresh and try again.');
         }
 
-        // Check if browser is connected
         try {
             const version = await this.browser.version();
             if (!version) {
-                throw new Error('Browser not responding');
+                throw new Error('Browser not responding. Please refresh and try again.');
             }
         } catch (error) {
-            this.log('Browser not responding, reinitializing...');
-            await this.initialize();
-            return;
+            throw new Error('Browser disconnected. Please refresh and try again.');
         }
 
-        // Verify authorization
         if (!this.authorized) {
-            this.log('Not authorized, checking authorization...');
-            await this.checkAuthorization();
+            throw new Error('Not authorized. Please login again.');
         }
     }
 
@@ -258,7 +270,7 @@ class PandaMasterController {
     }
 
     // ========================================
-    // CORE METHODS (FIXED)
+    // CORE METHODS
     // ========================================
 
     async loadAgentCredentials() {
@@ -290,29 +302,28 @@ class PandaMasterController {
     }
 
     async initialize() {
-        // If already initialized and browser is valid, just return
         if (this.initialized && this.browserReady && await this.isBrowserValid()) {
             this.lastActivity = Date.now();
             return;
         }
 
-        // If initialization is in progress, wait for it
         if (this.isInitializing) {
             this.log('Initialization already in progress, waiting...');
             if (this.initializationPromise) {
                 await this.initializationPromise;
                 return;
             }
-            // Fallback: wait and retry
             await new Promise(resolve => setTimeout(resolve, 2000));
-            return this.initialize();
+            if (this.initialized && this.browserReady) {
+                return;
+            }
+            throw new Error('Initialization timeout. Please try again.');
         }
 
         this.isInitializing = true;
         this.browserReady = false;
 
         try {
-            // Load credentials if not loaded
             if (!this.agentCredentials) {
                 const credentialsLoaded = await this.loadAgentCredentials();
                 if (!credentialsLoaded) {
@@ -340,7 +351,6 @@ class PandaMasterController {
     async createBrowser() {
         this.log('Initializing browser for PandaMaster...');
         
-        // Clean up existing browser
         if (this.browser) {
             try {
                 this.browser.removeAllListeners('disconnected');
@@ -419,22 +429,19 @@ class PandaMasterController {
                 return;
             }
             
-            // if (['stylesheet', 'font', 'media'].includes(resourceType)) {
-            //     req.abort().catch(() => {});
-            // } else {
-            //     req.continue().catch(() => {});
-            // }
-            req.continue().catch(() => {});
+            if (['stylesheet', 'font', 'media'].includes(resourceType)) {
+                req.abort().catch(() => {});
+            } else {
+                req.continue().catch(() => {});
+            }
         });
 
-        // Handle page errors
         this.page.on('error', (error) => {
             this.error(`Page crashed: ${error.message}`);
             this.browserReady = false;
             this.initialized = false;
         });
 
-        // Handle page close
         this.page.on('close', () => {
             this.log('Page closed unexpectedly');
             this.browserReady = false;
@@ -443,7 +450,6 @@ class PandaMasterController {
 
         await this.page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
 
-        // Load cookies
         const cookiesPath = path.join(__dirname, 'cookiespm.json');
         if (existsSync(cookiesPath)) {
             try {
@@ -456,7 +462,6 @@ class PandaMasterController {
             }
         }
 
-        // Handle browser disconnect
         this.browser.once('disconnected', () => {
             this.log('Browser disconnected');
             this.browser = null;
@@ -469,18 +474,19 @@ class PandaMasterController {
         await this.checkAuthorization();
     }
 
-        async checkAuthorization() {
+    async checkAuthorization() {
         try {
-            // Prevent multiple authorization attempts
+            // ⭐ Prevent multiple authorization attempts
             if (this.isAuthorizing) {
-                this.log('Authorization already in progress, skipping...');
+                this.log('Authorization already in progress, waiting...');
+                if (this.authorizationPromise) {
+                    await this.authorizationPromise;
+                }
                 return;
             }
 
             if (!this.page || this.page.isClosed()) {
-                this.log('Page is closed, recreating browser...');
-                await this.createBrowser();
-                return;
+                throw new Error('Page is closed, cannot check authorization');
             }
 
             this.log('Checking authorization status...');
@@ -490,7 +496,6 @@ class PandaMasterController {
                 timeout: 15000
             });
 
-            // Wait a moment for any redirect
             await new Promise(resolve => setTimeout(resolve, 1500));
 
             const currentPath = await this.page.evaluate(() => location.pathname);
@@ -500,16 +505,27 @@ class PandaMasterController {
                 this.authorized = false;
                 this.log('Redirected to login page - need to authorize');
                 
-                // Call authorize and wait for it to complete (including iframe wait)
+                // ⭐ ADD RETRY LIMIT CHECK
+                this.resetAuthRetryIfNeeded();
+                
+                if (this.authRetryCount >= this.maxAuthRetries) {
+                    throw new Error(`Max authorization attempts (${this.maxAuthRetries}) reached. Please wait a few minutes and refresh.`);
+                }
+                
+                this.authRetryCount++;
+                this.lastAuthAttempt = Date.now();
+                this.log(`Authorization attempt ${this.authRetryCount}/${this.maxAuthRetries}`);
+                
                 await this.authorize();
+                
+                // ⭐ RESET ON SUCCESS
+                this.authRetryCount = 0;
                 return;
             } else {
                 this.log('On Store.aspx, verifying iframe...');
                 
-                // Wait for iframe to be ready
                 await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
                 
-                // Wait for iframe content to be accessible
                 await this.page.waitForFunction(() => {
                     const iframe = document.querySelector('#frm_main_content');
                     if (!iframe) return false;
@@ -525,214 +541,177 @@ class PandaMasterController {
                     }
                 }, { timeout: 10000 });
                 
-                this.log('Authorized - iframe ready');
+                this.log('✅ Already authorized - iframe ready');
                 this.authorized = true;
+                
+                // ⭐ RESET RETRY COUNTER ON SUCCESS
+                this.authRetryCount = 0;
+                
                 await new Promise(resolve => setTimeout(resolve, 1000));
-                this.checkQueue();
                 return true;
             }
         } catch (error) {
             this.error(`Error checking authorization: ${error.message}`);
-            
-            if (error.message.includes('detached Frame') || 
-                error.message.includes('Target closed') ||
-                error.message.includes('Session closed')) {
-                this.log('Detected detached frame, recreating browser...');
-                this.browserReady = false;
-                this.initialized = false;
-                await this.createBrowser();
-                return;
-            }
-            
-            // Only retry if not already authorizing
-            if (!this.isAuthorizing) {
-                setTimeout(() => this.checkAuthorization(), 5000);
-            }
+            this.authorized = false;
+            throw error; // ⭐ Don't retry, just throw
         }
     }
 
     async authorize() {
         if (this.authorizationInProgress) {
-            this.log('Authorization already in progress, waiting...');
-            if (this.authorizationPromise) {
-                await this.authorizationPromise;
-                return;
-            }
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            return;
+            throw new Error('Authorization already in progress');
+        }
+
+        // ⭐ CHECK RETRY LIMIT AT START
+        this.resetAuthRetryIfNeeded();
+        
+        if (this.authRetryCount >= this.maxAuthRetries) {
+            throw new Error(`Max authorization attempts (${this.maxAuthRetries}) reached. Please wait ${Math.ceil(this.authResetInterval / 60000)} minutes.`);
         }
 
         this.authorizationInProgress = true;
         this.isAuthorizing = true;
         
-        this.authorizationPromise = (async () => {
-            try {
-                this.log('Starting authorization...');
-                
-                if (!this.page || this.page.isClosed()) {
-                    this.log('Page is invalid, recreating browser...');
-                    await this.createBrowser();
-                    return;
-                }
-
-                await this.page.goto(`https://pandamaster.vip/default.aspx`, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 15000
-                });
-
-                await Promise.all([
-                    this.page.waitForSelector('#txtLoginName', { timeout: 10000 }),
-                    this.page.waitForSelector('#txtLoginPass', { timeout: 10000 }),
-                    this.page.waitForSelector('#txtVerifyCode', { timeout: 10000 }),
-                    this.page.waitForSelector('#ImageCheck', { timeout: 10000 })
-                ]);
-
-                if (!this.agentCredentials) {
-                    const credentialsLoaded = await this.loadAgentCredentials();
-                    if (!credentialsLoaded) {
-                        throw new Error('Cannot authorize without agent credentials');
-                    }
-                }
-
-                this.log(`Using agent credentials: ${this.agentCredentials.username}`);
-                
-                // Clear and type credentials
-                await this.page.evaluate(() => {
-                    document.querySelector('#txtLoginName').value = '';
-                    document.querySelector('#txtLoginPass').value = '';
-                });
-                
-                await this.page.type('#txtLoginName', this.agentCredentials.username);
-                await this.page.type('#txtLoginPass', this.agentCredentials.password);
-
-                await this.page.waitForSelector('#ImageCheck', { timeout: 10000 });
-                
-                // Wait for captcha image to fully load
-                await this.page.waitForFunction(() => {
-                    const img = document.querySelector('#ImageCheck');
-                    return img && img.complete && img.naturalHeight !== 0;
-                }, { timeout: 10000 });
-
-                await new Promise(resolve => setTimeout(resolve, 500));
-
-                const base64Captcha = await this.page.evaluate(() => {
-                    const img = document.querySelector('#ImageCheck');
-                    if (!img || !img.complete || img.naturalHeight === 0) {
-                        throw new Error('Captcha image not loaded');
-                    }
-                    
-                    const canvas = document.createElement('canvas');
-                    canvas.width = img.naturalWidth || 132;
-                    canvas.height = img.naturalHeight || 40;
-                    const context = canvas.getContext('2d');
-                    context.drawImage(img, 0, 0);
-                    return canvas.toDataURL("image/png").replace(/^data:image\/?[A-z]*;base64,/, "");
-                });
-
-                if (!base64Captcha || base64Captcha.length < 100) {
-                    throw new Error('Failed to capture captcha image');
-                }
-
-                const captchaValue = await Captcha(base64Captcha, 5);
-                
-                if (!captchaValue) {
-                    throw new Error('Failed to solve captcha');
-                }
-                
-                this.log(`Captcha solved: ${captchaValue}`);
-                
-                await this.page.type('#txtVerifyCode', captchaValue);
-                await this.page.click('#btnLogin');
-
-                await new Promise(resolve => setTimeout(resolve, 2000));
-
-                const error_message = await this.page.evaluate(() => {
-                    const element = document.querySelector('#mb_con p');
-                    if (!element) return false;
-                    return element.innerText;
-                });
-
-                if (error_message) {
-                    this.error(`Error while login: ${error_message}`);
-                    throw new Error(`Login failed: ${error_message}`);
-                }
-
-                const is_authorized = await this.page.evaluate(() => {
-                    return location.pathname === '/Store.aspx';
-                });
-
-                if (is_authorized) {
-    this.authorized = true;
-    this.log('Successfully authorized');
-    await this.saveCookies();
-    
-    // ⭐ ADD THIS SECTION - Wait for iframe before calling checkQueue
-    this.log('Waiting for Store.aspx iframe to be ready...');
-    try {
-        await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
-        
-        // Wait for iframe content to be accessible
-        await this.page.waitForFunction(() => {
-            const iframe = document.querySelector('#frm_main_content');
-            if (!iframe) return false;
+        try {
+            this.log('Starting authorization...');
             
-            try {
-                const iframe_document = iframe.contentWindow.document;
-                if (!iframe_document) return false;
-                
-                const hasContent = iframe_document.querySelector('#txtSearch') !== null;
-                return iframe_document.readyState === 'complete' && hasContent;
-            } catch (e) {
-                return false;
+            if (!this.page || this.page.isClosed()) {
+                throw new Error('Page is invalid, cannot authorize');
             }
-        }, { timeout: 10000 });
-        
-        this.log('Store.aspx iframe is fully loaded and ready');
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-    } catch (iframeError) {
-        this.error(`Iframe failed to load after authorization: ${iframeError.message}`);
-    }
-    
-    // NOW it's safe to call checkQueue
-    this.checkQueue();
-} else {
-                    this.log('Failed login - not redirected to Store.aspx');
-                    throw new Error('Login failed - no redirect');
-                }
-                
-            } catch (error) {
-                this.error(`Error during authorization: ${error.message}`);
-                this.authorized = false;
-                
-                if (error.message.includes('detached Frame') || 
-                    error.message.includes('Target closed') ||
-                    error.message.includes('Session closed')) {
-                    this.log('Browser session lost, recreating...');
-                    this.browserReady = false;
-                    this.initialized = false;
-                    setTimeout(async () => {
-                        await this.createBrowser();
-                    }, 5000);
-                    return;
-                }
-                
-                // Retry authorization
-                setTimeout(() => this.authorize(), 5000);
-            } finally {
-                this.authorizationInProgress = false;
-                this.isAuthorizing = false;
-                this.authorizationPromise = null;
-            }
-        })();
 
-        await this.authorizationPromise;
+            await this.page.goto(`https://pandamaster.vip/default.aspx`, {
+                waitUntil: 'domcontentloaded',
+                timeout: 15000
+            });
+
+            await Promise.all([
+                this.page.waitForSelector('#txtLoginName', { timeout: 10000 }),
+                this.page.waitForSelector('#txtLoginPass', { timeout: 10000 }),
+                this.page.waitForSelector('#txtVerifyCode', { timeout: 10000 }),
+                this.page.waitForSelector('#ImageCheck', { timeout: 10000 })
+            ]);
+
+            if (!this.agentCredentials) {
+                const credentialsLoaded = await this.loadAgentCredentials();
+                if (!credentialsLoaded) {
+                    throw new Error('Cannot authorize without agent credentials');
+                }
+            }
+
+            this.log(`Using agent credentials: ${this.agentCredentials.username}`);
+            
+            await this.page.evaluate(() => {
+                document.querySelector('#txtLoginName').value = '';
+                document.querySelector('#txtLoginPass').value = '';
+            });
+            
+            await this.page.type('#txtLoginName', this.agentCredentials.username);
+            await this.page.type('#txtLoginPass', this.agentCredentials.password);
+
+            await this.page.waitForSelector('#ImageCheck', { timeout: 10000 });
+            
+            await this.page.waitForFunction(() => {
+                const img = document.querySelector('#ImageCheck');
+                return img && img.complete && img.naturalHeight !== 0;
+            }, { timeout: 10000 });
+
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const base64Captcha = await this.page.evaluate(() => {
+                const img = document.querySelector('#ImageCheck');
+                if (!img || !img.complete || img.naturalHeight === 0) {
+                    throw new Error('Captcha image not loaded');
+                }
+                
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth || 132;
+                canvas.height = img.naturalHeight || 40;
+                const context = canvas.getContext('2d');
+                context.drawImage(img, 0, 0);
+                return canvas.toDataURL("image/png").replace(/^data:image\/?[A-z]*;base64,/, "");
+            });
+
+            if (!base64Captcha || base64Captcha.length < 100) {
+                throw new Error('Failed to capture captcha image');
+            }
+
+            const captchaValue = await Captcha(base64Captcha, 5);
+            
+            if (!captchaValue) {
+                throw new Error('Failed to solve captcha');
+            }
+            
+            this.log(`Captcha solved: ${captchaValue}`);
+            
+            await this.page.type('#txtVerifyCode', captchaValue);
+            await this.page.click('#btnLogin');
+
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            const error_message = await this.page.evaluate(() => {
+                const element = document.querySelector('#mb_con p');
+                if (!element) return false;
+                return element.innerText;
+            });
+
+            if (error_message) {
+                this.error(`Error while login: ${error_message}`);
+                throw new Error(`Login failed: ${error_message}`);
+            }
+
+            const is_authorized = await this.page.evaluate(() => {
+                return location.pathname === '/Store.aspx';
+            });
+
+            if (is_authorized) {
+                this.authorized = true;
+                this.log('✅ Successfully authorized');
+                
+                // ⭐ RESET RETRY COUNTER ON SUCCESS
+                this.authRetryCount = 0;
+                
+                await this.saveCookies();
+                
+                this.log('Waiting for Store.aspx iframe to be ready...');
+                await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
+                
+                await this.page.waitForFunction(() => {
+                    const iframe = document.querySelector('#frm_main_content');
+                    if (!iframe) return false;
+                    
+                    try {
+                        const iframe_document = iframe.contentWindow.document;
+                        if (!iframe_document) return false;
+                        
+                        const hasContent = iframe_document.querySelector('#txtSearch') !== null;
+                        return iframe_document.readyState === 'complete' && hasContent;
+                    } catch (e) {
+                        return false;
+                    }
+                }, { timeout: 10000 });
+                
+                this.log('Store.aspx iframe is fully loaded and ready');
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            } else {
+                this.log('Failed login - not redirected to Store.aspx');
+                throw new Error('Login failed - no redirect');
+            }
+            
+        } catch (error) {
+            this.error(`Error during authorization: ${error.message}`);
+            this.authorized = false;
+            throw error; // ⭐ Don't retry, just throw
+        } finally {
+            this.authorizationInProgress = false;
+            this.isAuthorizing = false;
+            this.authorizationPromise = null;
+        }
     }
 
     async saveCookies() {
         try {
             const cookies = await this.page.cookies();
-            const cookiesPath = path.join(__dirname, 'cookiesos.json');
+            const cookiesPath = path.join(__dirname, 'cookiespm.json');
             writeFileSync(cookiesPath, JSON.stringify(cookies, null, 4));
             this.log('Cookies saved successfully');
             return true;
@@ -740,56 +719,8 @@ class PandaMasterController {
             this.error(`Error saving cookies: ${error.message}`);
             return false;
         }
-    }
-
-    async checkQueue() {
-        try {
-            const task = await Tasks.get('pandamaster');
-
-            if (!task) {
-                return setTimeout(this.checkQueue.bind(this), 1000);
-            }
-
-            console.log('Processing task:', task);
-
-            let task_result = null;
-
-            switch (task.type) {
-                case 'download_code':
-                    task_result = await this.getDownloadCode(task);
-                    break;
-                case 'get_balance':
-                    task_result = await this.getBalance(task);
-                    break;
-                case 'get_admin_balance':
-                    task_result = await this.getBalanceAdmin(task);
-                    break;
-                case 'recharge':
-                    task_result = await this.recharge(task);
-                    break;
-                case 'redeem':
-                    task_result = await this.redeem(task);
-                    break;
-                case 'create':
-                    task_result = await this.createAccount(task);
-                    break;
-                case 'reset':
-                    task_result = await this.resetPassword(task);
-                    break;
-                default:
-                    this.error(`Unknown task type: ${task.type}`);
-            }
-
-            if (task_result === -1) {
-                return;
-            }
-
-            return setTimeout(this.checkQueue.bind(this), 5000);
-        } catch (error) {
-            this.error(`Error in checkQueue: ${error.message}`);
-            setTimeout(this.checkQueue.bind(this), 5000);
-        }
-    }
+    }// PART 2 OF 3 - Lines 651-1300
+// Paste this AFTER Part 1
 
     // ========================================
     // API METHODS WITH QUEUE
@@ -900,7 +831,7 @@ class PandaMasterController {
 
                 const balance = await this.getBalance(task);
 
-                if (balance !== null && balance !== false && balance !== -1) {
+                if (balance !== null && balance !== false) {
                     await gameAccount.updateBalance(balance);
 
                     return {
@@ -932,146 +863,123 @@ class PandaMasterController {
     }
 
     async rechargeAccount(userId, gameLogin, totalAmount, baseAmount, remark = 'API Recharge') {
-    return await this.queueOperation(`recharge:${gameLogin}:${totalAmount}`, async () => {
-        try {
-            console.log("Recharge (Queued) - Finding game account...");
-            console.log(`Base Amount: $${baseAmount}, Total Amount (with bonus): $${totalAmount}`);
-            
-            const gameAccount = await GameAccount.findOne({
-                userId,
-                gameLogin,
-                gameType: this.gameType
-            });
-
-            if (!gameAccount) {
-                throw new Error('Game account not found');
-            }
-
-            // ✅ CREATE TRANSACTION with BASE amount (what user paid)
-            // const transaction = {
-            //     type: 'recharge',
-            //     amount: baseAmount, // ✅ Record only the base amount user paid
-            //     remark,
-            //     status: 'pending',
-            //     metadata: {
-            //         baseAmount: baseAmount,
-            //         bonusAmount: totalAmount - baseAmount,
-            //         totalAmount: totalAmount,
-            //         note: 'Includes 10% bonus'
-            //     }
-            // };
-
-            // await gameAccount.addTransaction(transaction);
-            // const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
-            // console.log(`✅ Transaction created: ${transactionId} with base amount: $${baseAmount}`);
-
-            // ✅ CREATE TASK with TOTAL amount (to recharge in game)
-             const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-            // ✅ CREATE TASK with the unique ID
-            const task = {
-                id: transactionId, // Use the generated unique ID
-                login: gameLogin,
-                amount: totalAmount, // Recharge the TOTAL amount in game
-                remark,
-                is_manual: false
-            };
-
-            console.log(`Calling recharge with total amount: $${totalAmount}`);
-            const result = await this.recharge(task);
-
-            if (result && result !== -1) {
-                const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+        return await this.queueOperation(`recharge:${gameLogin}:${totalAmount}`, async () => {
+            try {
+                console.log("Recharge (Queued) - Finding game account...");
+                console.log(`Base Amount: $${baseAmount}, Total Amount (with bonus): $${totalAmount}`);
                 
-                console.log(`✅ Recharge successful`);
-                console.log(`   - User paid: $${baseAmount}`);
-                console.log(`   - Bonus: $${totalAmount - baseAmount}`);
-                console.log(`   - Total recharged in game: $${totalAmount}`);
-                console.log(`   - New balance: $${updatedGameAccount.balance}`);
-                
-                return {
-                    success: true,
-                    data: {
-                        transactionId,
-                        newBalance: updatedGameAccount.balance,
-                        baseAmount: baseAmount,
-                        bonusAmount: totalAmount - baseAmount,
-                        totalAmount: totalAmount
-                    },
-                    message: 'Recharge completed successfully'
+                const gameAccount = await GameAccount.findOne({
+                    userId,
+                    gameLogin,
+                    gameType: this.gameType
+                });
+
+                if (!gameAccount) {
+                    throw new Error('Game account not found');
+                }
+
+                const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+                const task = {
+                    id: transactionId,
+                    login: gameLogin,
+                    amount: totalAmount,
+                    remark,
+                    is_manual: false
                 };
-            } else {
-                throw new Error('Recharge failed');
-            }
 
-        } catch (error) {
-            this.error(`Error processing recharge: ${error.message}`);
-            throw error;
-        }
-    });
-}
+                console.log(`Calling recharge with total amount: $${totalAmount}`);
+                const result = await this.recharge(task);
+
+                if (result && result !== -1) {
+                    const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+                    
+                    console.log(`✅ Recharge successful`);
+                    console.log(`   - User paid: $${baseAmount}`);
+                    console.log(`   - Bonus: $${totalAmount - baseAmount}`);
+                    console.log(`   - Total recharged in game: $${totalAmount}`);
+                    console.log(`   - New balance: $${updatedGameAccount.balance}`);
+                    
+                    return {
+                        success: true,
+                        data: {
+                            transactionId,
+                            newBalance: updatedGameAccount.balance,
+                            baseAmount: baseAmount,
+                            bonusAmount: totalAmount - baseAmount,
+                            totalAmount: totalAmount
+                        },
+                        message: 'Recharge completed successfully'
+                    };
+                } else {
+                    throw new Error('Recharge failed');
+                }
+
+            } catch (error) {
+                this.error(`Error processing recharge: ${error.message}`);
+                throw error;
+            }
+        });
+    }
 
     async redeemFromAccount(userId, gameLogin, totalAmount, cashoutAmount, remark = 'API Redeem') {
-    return await this.queueOperation(`redeem:${gameLogin}:${cashoutAmount}`, async () => {
-        try {
-            console.log('🔵 redeemFromAccount START:', { userId, gameLogin, totalAmount, cashoutAmount, remark });
-            
-            const gameAccount = await GameAccount.findOne({
-                userId,
-                gameLogin,
-                gameType: this.gameType
-            });
-
-            if (!gameAccount) {
-                console.log('❌ Game account not found in database');
-                throw new Error('Game account not found');
-            }
-            console.log('✅ Game account found:', gameAccount._id);
-
-            if (gameAccount.balance < totalAmount) {
-                console.log(`❌ Insufficient balance: Has ${gameAccount.balance}, needs ${totalAmount}`);
-                throw new Error('Insufficient balance');
-            }
-            console.log('✅ Balance sufficient');
-
-            // ❌ REMOVED: Don't create transaction here
-            // The gameController already created it
-
-            const task = {
-                id: null, // We don't have a transaction ID yet since gameController created it
-                login: gameLogin,
-                amount: totalAmount, // Full amount to redeem from game
-                remark,
-                is_manual: true
-            };
-
-            console.log('Calling redeem with task:', task);
-            const result = await this.redeem(task);
-            console.log('Redeem result:', result);
-
-            if (result && result !== -1) {
-                console.log('✅ Redeem successful, fetching updated balance...');
-                const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+        return await this.queueOperation(`redeem:${gameLogin}:${cashoutAmount}`, async () => {
+            try {
+                console.log('🔵 redeemFromAccount START:', { userId, gameLogin, totalAmount, cashoutAmount, remark });
                 
-                return {
-                    success: true,
-                    data: {
-                        newBalance: updatedGameAccount.balance
-                    },
-                    message: 'Redeem completed successfully'
-                };
-            } else {
-                console.log('❌ Redeem returned false or -1');
-                throw new Error('Redeem failed');
-            }
+                const gameAccount = await GameAccount.findOne({
+                    userId,
+                    gameLogin,
+                    gameType: this.gameType
+                });
 
-        } catch (error) {
-            console.log('❌ redeemFromAccount ERROR:', error.message);
-            this.error(`Error processing redeem: ${error.message}`);
-            throw error;
-        }
-    });
-}
+                if (!gameAccount) {
+                    console.log('❌ Game account not found in database');
+                    throw new Error('Game account not found');
+                }
+                console.log('✅ Game account found:', gameAccount._id);
+
+                if (gameAccount.balance < totalAmount) {
+                    console.log(`❌ Insufficient balance: Has ${gameAccount.balance}, needs ${totalAmount}`);
+                    throw new Error('Insufficient balance');
+                }
+                console.log('✅ Balance sufficient');
+
+                const task = {
+                    id: null,
+                    login: gameLogin,
+                    amount: totalAmount,
+                    remark,
+                    is_manual: true
+                };
+
+                console.log('Calling redeem with task:', task);
+                const result = await this.redeem(task);
+                console.log('Redeem result:', result);
+
+                if (result && result !== -1) {
+                    console.log('✅ Redeem successful, fetching updated balance...');
+                    const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+                    
+                    return {
+                        success: true,
+                        data: {
+                            newBalance: updatedGameAccount.balance
+                        },
+                        message: 'Redeem completed successfully'
+                    };
+                } else {
+                    console.log('❌ Redeem returned false or -1');
+                    throw new Error('Redeem failed');
+                }
+
+            } catch (error) {
+                console.log('❌ redeemFromAccount ERROR:', error.message);
+                this.error(`Error processing redeem: ${error.message}`);
+                throw error;
+            }
+        });
+    }
 
     async getDownloadCodeForUser(userId, gameLogin) {
         return await this.queueOperation(`downloadCode:${gameLogin}`, async () => {
@@ -1096,7 +1004,7 @@ class PandaMasterController {
 
                 const code = await this.getDownloadCode(task);
 
-                if (code && code !== -1) {
+                if (code) {
                     gameAccount.downloadCode = code;
                     await gameAccount.save();
 
@@ -1150,7 +1058,7 @@ class PandaMasterController {
 
                 const result = await this.resetPassword(task);
 
-                if (result && result !== -1) {
+                if (result) {
                     gameAccount.gamePassword = newPassword;
                     await gameAccount.save();
 
@@ -1181,18 +1089,16 @@ class PandaMasterController {
 
     async getAdminBalance() {
         return await this.queueOperation('getAdminBalance', async () => {
-            // Check cache first
             if (this.cache.adminBalance !== null && 
                 this.cache.adminBalanceTimestamp && 
                 Date.now() - this.cache.adminBalanceTimestamp < this.cache.cacheDuration) {
-                this.log(`Returning cached admin balance: $${this.cache.adminBalance}`);
+                this.log(`Returning cached admin balance: ${this.cache.adminBalance}`);
                 return this.cache.adminBalance;
             }
             
             const balance = await this._getAdminBalanceCore();
             
-            // Update cache on success
-            if (balance !== false && balance !== -1 && balance !== null) {
+            if (balance !== false && balance !== null) {
                 this.cache.adminBalance = balance;
                 this.cache.adminBalanceTimestamp = Date.now();
             }
@@ -1203,7 +1109,6 @@ class PandaMasterController {
 
     async _getAdminBalanceCore() {
         try {
-            // Ensure we're on the right page
             const currentPath = await this.page.evaluate(() => location.pathname);
             if (currentPath !== '/Store.aspx') {
                 await this.page.goto('https://pandamaster.vip/Store.aspx', { 
@@ -1213,7 +1118,6 @@ class PandaMasterController {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
 
-            // Check for session timeout
             const need_login = await this.page.evaluate(() => {
                 const login_pathname = location.pathname === '/default.aspx';
                 if (login_pathname) return true;
@@ -1222,10 +1126,7 @@ class PandaMasterController {
             });
 
             if (need_login) {
-                this.log('Session timeout detected, re-authorizing...');
-                this.authorized = false;
-                await this.authorize();
-                return -1;
+                throw new Error('Session expired. Please refresh the page.');
             }
 
             await this.page.waitForSelector('#UserBalance', { timeout: 10000 });
@@ -1244,341 +1145,212 @@ class PandaMasterController {
                 return false;
             }
 
-            this.log(`Current admin balance: $${balance}`);
+            this.log(`Current admin balance: ${balance}`);
             return balance;
         } catch (error) {
             this.error(`Error getting admin balance: ${error.message}`);
-            
-            // Handle session errors
-            if (error.message.includes('Session closed') || 
-                error.message.includes('Target closed')) {
-                this.browserReady = false;
-                this.initialized = false;
-                await this.reinitialize();
-                return -1;
-            }
-            
-            return false;
+            throw error;
         }
     }
 
     // ========================================
-    // CORE OPERATION METHODS (WITH FIXES)
+    // CORE OPERATION METHODS
     // ========================================
 
-   // Replace the getBalance method - adds double-click on Update button
-
-// Replace the getBalance method - properly waits for AJAX and form stability
-
-async getBalance({ id, login }) {
-    console.log('getBalance called with:', id, login);
-    
-    try {
-        // Ensure browser is ready
-        await this.ensureBrowserReady();
+    async getBalance({ id, login }) {
+        console.log('getBalance called with:', id, login);
         
-        const currentPath = await this.page.evaluate(() => location.pathname);
-        console.log('Current path:', currentPath);
-        
-        if (currentPath !== '/Store.aspx') {
-            console.log('Not on Store.aspx, navigating...');
-            await this.page.goto('https://pandamaster.vip/Store.aspx', {
-                waitUntil: 'networkidle2',
-                timeout: 15000
+        try {
+            await this.ensureBrowserReady();
+            
+            const currentPath = await this.page.evaluate(() => location.pathname);
+            console.log('Current path:', currentPath);
+            
+            if (currentPath !== '/Store.aspx') {
+                console.log('Not on Store.aspx, navigating...');
+                await this.page.goto('https://pandamaster.vip/Store.aspx', {
+                    waitUntil: 'networkidle2',
+                    timeout: 15000
+                });
+                
+                await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            
+            const needLogin = await this.page.evaluate(() => {
+                return location.pathname === '/default.aspx';
             });
             
-            await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-        
-        // Check for session timeout
-        const needLogin = await this.page.evaluate(() => {
-            return location.pathname === '/default.aspx';
-        });
-        
-        if (needLogin) {
-            console.log('Need to login');
-            this.authorized = false;
-            await this.authorize();
-            return -1;
-        }
-        
-        // Verify iframe is accessible
-        console.log('Checking iframe accessibility...');
-        const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
-        
-        if (!iframeAccessible) {
-            console.log('Iframe not accessible, waiting and retrying...');
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            
-            const stillNotAccessible = await this.isIframeAccessible('#frm_main_content');
-            if (stillNotAccessible) {
-                console.log('Iframe still not accessible, reloading...');
-                await this.page.reload({ waitUntil: 'networkidle2' });
-                await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
-                await new Promise(resolve => setTimeout(resolve, 3000));
+            if (needLogin) {
+                throw new Error('Session expired. Please refresh the page.');
             }
-        }
-        
-        console.log('Searching for account:', login);
-        
-        await this.page.evaluate(login => {
-            const iframe = document.querySelector('#frm_main_content');
-            const iframe_document = iframe.contentWindow.document;
-            const searchBox = iframe_document.querySelector('#txtSearch');
             
-            searchBox.value = '';
-            searchBox.value = login;
+            console.log('Checking iframe accessibility...');
+            const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
             
-            iframe_document.querySelectorAll('#content a')[0].click();
-        }, login);
-        
-        console.log('Search initiated, waiting for results...');
-        
-        await this.page.waitForFunction((login) => {
-            try {
+            if (!iframeAccessible) {
+                throw new Error('Page not ready. Please try again.');
+            }
+            
+            console.log('Searching for account:', login);
+            
+            await this.page.evaluate(login => {
                 const iframe = document.querySelector('#frm_main_content');
-                if (!iframe) return false;
+                const iframe_document = iframe.contentWindow.document;
+                const searchBox = iframe_document.querySelector('#txtSearch');
+                
+                searchBox.value = '';
+                searchBox.value = login;
+                
+                iframe_document.querySelectorAll('#content a')[0].click();
+            }, login);
+            
+            console.log('Search initiated, waiting for results...');
+            
+            await this.page.waitForFunction((login) => {
+                try {
+                    const iframe = document.querySelector('#frm_main_content');
+                    if (!iframe) return false;
+                    const iframe_document = iframe.contentWindow.document;
+                    const items = iframe_document.querySelectorAll('#item tr');
+                    
+                    if (items.length < 2) return false;
+                    
+                    for (let i = 1; i < items.length; i++) {
+                        const tds = items[i].querySelectorAll('td');
+                        if (tds.length > 2) {
+                            const accountName = tds[2].innerText.trim().toLowerCase();
+                            if (accountName === login.toLowerCase()) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                } catch (e) {
+                    return false;
+                }
+            }, { timeout: 8000 }, login);
+            
+            console.log('Search results appeared');
+            
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            const login_selected = await this.page.evaluate(login => {
+                const iframe = document.querySelector('#frm_main_content');
                 const iframe_document = iframe.contentWindow.document;
                 const items = iframe_document.querySelectorAll('#item tr');
                 
-                if (items.length < 2) return false;
+                console.log('Found', items.length, 'rows in search results');
+                
+                if (items.length < 2) {
+                    console.log('No results found');
+                    return false;
+                }
+                
+                let matchingRows = [];
                 
                 for (let i = 1; i < items.length; i++) {
                     const tds = items[i].querySelectorAll('td');
                     if (tds.length > 2) {
                         const accountName = tds[2].innerText.trim().toLowerCase();
                         if (accountName === login.toLowerCase()) {
-                            return true;
+                            matchingRows.push(i);
                         }
                     }
                 }
-                return false;
-            } catch (e) {
-                return false;
-            }
-        }, { timeout: 8000 }, login);
-        
-        console.log('Search results appeared');
-        
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Click Update button
-        console.log('Clicking Update button...');
-        const login_selected = await this.page.evaluate(login => {
-            const iframe = document.querySelector('#frm_main_content');
-            const iframe_document = iframe.contentWindow.document;
-            const items = iframe_document.querySelectorAll('#item tr');
-            
-            console.log('Found', items.length, 'rows in search results');
-            
-            if (items.length < 2) {
-                console.log('No results found');
-                return false;
-            }
-            
-            let matchingRows = [];
-            
-            for (let i = 1; i < items.length; i++) {
-                const tds = items[i].querySelectorAll('td');
-                if (tds.length > 2) {
-                    const accountName = tds[2].innerText.trim().toLowerCase();
-                    if (accountName === login.toLowerCase()) {
-                        matchingRows.push(i);
-                    }
-                }
-            }
-            
-            console.log('Found', matchingRows.length, 'matching rows');
-            
-            if (matchingRows.length === 0) {
-                return false;
-            }
-            
-            const latestRowIndex = matchingRows[matchingRows.length - 1];
-            const latestRow = items[latestRowIndex];
-            const tds = latestRow.querySelectorAll('td');
-            
-            console.log('Clicking on row', latestRowIndex);
-            tds[0].querySelector('a').click();
-            return true;
-        }, login);
-        
-        console.log('Account selection result:', login_selected);
-        
-        if (!login_selected) {
-            this.error(`Error while getting balance: login ${login} not found!`);
-            await Tasks.error(id, 'login not found');
-            return false;
-        }
-        
-        console.log('Waiting for account details to load and stabilize...');
-        
-        // ⭐ KEY FIX: Wait for the balance field to populate AND remain stable
-        await this.page.waitForFunction(() => {
-            try {
-                const iframe = document.querySelector('#frm_main_content');
-                if (!iframe) return false;
                 
-                const iframe_document = iframe.contentWindow.document;
-                const balance_element = iframe_document.querySelector('#txtBalance');
+                console.log('Found', matchingRows.length, 'matching rows');
                 
-                if (!balance_element) {
-                    console.log('Balance element not found yet');
+                if (matchingRows.length === 0) {
                     return false;
                 }
                 
-                const balanceText = balance_element.value || balance_element.innerText || balance_element.textContent;
-                console.log('Checking balance text:', balanceText);
+                const latestRowIndex = matchingRows[matchingRows.length - 1];
+                const latestRow = items[latestRowIndex];
+                const tds = latestRow.querySelectorAll('td');
                 
-                // Must have a value (even "0")
-                if (!balanceText && balanceText !== '0') {
-                    console.log('Balance text is empty');
-                    return false;
-                }
-                
-                // Check if it's a valid number
-                const balanceValue = parseFloat(balanceText);
-                if (isNaN(balanceValue)) {
-                    console.log('Balance is not a number');
-                    return false;
-                }
-                
-                console.log('✅ Balance is populated:', balanceValue);
+                console.log('Clicking on row', latestRowIndex);
+                tds[0].querySelector('a').click();
                 return true;
-                
-            } catch (e) {
-                console.log('Error checking balance:', e.message);
-                return false;
+            }, login);
+            
+            console.log('Account selection result:', login_selected);
+            
+            if (!login_selected) {
+                throw new Error(`Account ${login} not found`);
             }
-        }, { timeout: 15000 }); // Wait up to 15 seconds for balance to populate
-        
-        console.log('Balance field populated, waiting for stability...');
-        
-        // ⭐ Wait additional time to ensure it doesn't vanish
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        // ⭐ Verify it's STILL there after waiting
-        const balanceStillThere = await this.page.evaluate(() => {
-            try {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-                const balance_element = iframe_document.querySelector('#txtBalance');
-                
-                if (!balance_element) return { exists: false };
-                
-                const balanceText = balance_element.value || balance_element.innerText || balance_element.textContent;
-                console.log('Balance after stability wait:', balanceText);
-                
-                return {
-                    exists: true,
-                    value: balanceText
-                };
-            } catch (e) {
-                console.log('Error in stability check:', e.message);
-                return { exists: false };
-            }
-        });
-        
-        if (!balanceStillThere.exists) {
-            console.log('❌ Balance vanished after stability wait!');
-            this.error(`Balance field disappeared for login ${login}`);
-            await Tasks.error(id, 'balance field disappeared');
-            return false;
-        }
-        
-        console.log('Balance is stable, reading final value...');
-        
-        const balance = await this.page.evaluate(() => {
-            try {
-                const iframe = document.querySelector('#frm_main_content');
-                const iframe_document = iframe.contentWindow.document;
-                const balance_element = iframe_document.querySelector('#txtBalance');
-                
-                if (!balance_element) {
-                    console.log('Balance element not found');
+            
+            console.log('Waiting for account details to load...');
+            
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            const balance = await this.page.evaluate(() => {
+                try {
+                    const iframe = document.querySelector('#frm_main_content');
+                    const iframe_document = iframe.contentWindow.document;
+                    const balance_element = iframe_document.querySelector('#txtBalance');
+                    
+                    if (!balance_element) {
+                        return false;
+                    }
+                    
+                    const balanceText = balance_element.value || balance_element.innerText || balance_element.textContent;
+                    const balanceValue = parseFloat(balanceText);
+                    
+                    return isNaN(balanceValue) ? false : balanceValue;
+                } catch (e) {
                     return false;
                 }
-                
-                const balanceText = balance_element.value || balance_element.innerText || balance_element.textContent;
-                console.log('Final balance text:', balanceText);
-                
-                const balanceValue = parseFloat(balanceText);
-                console.log('Final balance value:', balanceValue);
-                
-                return isNaN(balanceValue) ? false : balanceValue;
-            } catch (e) {
-                console.log('Error reading balance:', e.message);
-                return false;
+            });
+            
+            console.log('Balance retrieved:', balance);
+            
+            if (balance === false) {
+                throw new Error('Could not retrieve balance');
             }
-        });
-        
-        console.log('Balance retrieved:', balance);
-        
-        if (balance === false) {
-            this.error(`Could not find balance element for login ${login}`);
-            await Tasks.error(id, 'balance element not found');
-            return false;
-        }
-        
-        this.log(`Current balance for ${login}: ${balance}`);
-        
-        // Update database
-        try {
-            const gameAccount = await GameAccount.findOne({ gameLogin: login });
-            if (gameAccount) {
-                await gameAccount.updateBalance(balance);
+            
+            this.log(`Current balance for ${login}: ${balance}`);
+            
+            try {
+                const gameAccount = await GameAccount.findOne({ gameLogin: login });
+                if (gameAccount) {
+                    await gameAccount.updateBalance(balance);
+                }
+            } catch (dbError) {
+                this.error(`Error updating balance in DB: ${dbError.message}`);
             }
-        } catch (dbError) {
-            this.error(`Error updating balance in DB: ${dbError.message}`);
-        }
-        
-        await Tasks.approve(id, balance);
-        
-        console.log('Navigating back to store main page...');
-        await this.page.goto('https://pandamaster.vip/Store.aspx', {
-            waitUntil: 'networkidle2',
-            timeout: 10000
-        });
-        
-        await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        console.log('Back on main store page, ready for next operation');
-        
-        return balance;
-        
-    } catch (error) {
-        console.error('Error during get balance:', error.message);
-        this.error(`Error during get balance: ${error.message}`);
-        
-        // Handle session errors
-        if (error.message.includes('Session closed') || 
-            error.message.includes('Target closed') ||
-            error.message.includes('detached Frame')) {
-            this.browserReady = false;
-            this.initialized = false;
-            await this.reinitialize();
-            return -1;
-        }
-        
-        // Try to navigate back to store
-        try {
+            
+            if (id) {
+                await Tasks.approve(id, balance);
+            }
+            
+            console.log('Navigating back to store main page...');
             await this.page.goto('https://pandamaster.vip/Store.aspx', {
                 waitUntil: 'networkidle2',
                 timeout: 10000
             });
-        } catch (navError) {
-            console.error('Failed to navigate back to store:', navError.message);
+            
+            await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            console.log('Back on main store page, ready for next operation');
+            
+            return balance;
+            
+        } catch (error) {
+            console.error('Error during get balance:', error.message);
+            this.error(`Error during get balance: ${error.message}`);
+            
+            if (id) {
+                await Tasks.error(id, error.message);
+            }
+            
+            throw error;
         }
-        
-        return false;
     }
-}
 
     async getDownloadCode(task) {
         try {
-            // Ensure browser is ready
             await this.ensureBrowserReady();
             
             const need_login = await this.page.evaluate(() => {
@@ -1587,9 +1359,7 @@ async getBalance({ id, login }) {
             });
 
             if (need_login) {
-                this.authorized = false;
-                await this.authorize();
-                return -1;
+                throw new Error('Session expired. Please refresh the page.');
             }
 
             await this.page.goto('https://pandamaster.vip/IphoneCode.aspx', {
@@ -1604,13 +1374,11 @@ async getBalance({ id, login }) {
             });
 
             if (!code) {
-                this.error('Download code element not found');
-                return false;
+                throw new Error('Download code not found');
             }
 
             this.log(`Download code: ${code}`);
 
-            // Update database
             try {
                 const gameAccount = await GameAccount.findById(task.id);
                 if (gameAccount) {
@@ -1623,275 +1391,239 @@ async getBalance({ id, login }) {
 
             await Tasks.approve(task.id, code);
             
-            // Navigate back
             await this.page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 });
 
             return code;
         } catch (error) {
             this.error(`Error getting download code: ${error.message}`);
-            
-            // Handle session errors
-            if (error.message.includes('Session closed') || 
-                error.message.includes('Target closed')) {
-                this.browserReady = false;
-                this.initialized = false;
-                await this.reinitialize();
-                return -1;
-            }
-            
-            return false;
+            await Tasks.error(task.id, error.message);
+            throw error;
         }
     }
 
     async createAccount({ id, userId }) {
-    console.log('🔴 CREATE ACCOUNT START:', { id, userId });
-    
-    try {
-        // Ensure browser is ready
-        await this.ensureBrowserReady();
+        console.log('🔴 CREATE ACCOUNT START:', { id, userId });
         
-        // Generate credentials
-        const generateRandomString = () => {
-            const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-            let result = '';
-            for (let i = 0; i < 4; i++) {
-                result += chars.charAt(Math.floor(Math.random() * chars.length));
-            }
-            return result;
-        };
-        
-        const login = `bc${generateRandomString()}_${generateRandomString()}`;
-        const password = `bc${generateRandomString()}_${generateRandomString()}`;
-        
-        console.log(`Generated credentials - Login: ${login}, Password: ${password}`);
-
-        // Step 1: Check page state
-        console.log('Step 1: Checking page state...');
-        const currentPath = await this.page.evaluate(() => location.pathname);
-        console.log('Current path:', currentPath);
-        
-        if (currentPath === '/default.aspx') {
-            console.log('Need to authorize, returning -1');
-            this.authorized = false;
-            await this.authorize();
-            return -1;
-        }
-        console.log('✅ On correct page');
-
-        // Step 2: Wait for main iframe to be ready
-        console.log('Step 2: Waiting for main iframe to be ready...');
-        await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
-        
-        // Wait for iframe to be fully accessible
-        await this.page.waitForFunction(() => {
-            const iframe = document.querySelector('#frm_main_content');
-            if (!iframe) return false;
-            
-            try {
-                const iframe_document = iframe.contentWindow.document;
-                if (!iframe_document) return false;
-                
-                const hasContent = iframe_document.querySelector('#txtSearch') !== null;
-                return iframe_document.readyState === 'complete' && hasContent;
-            } catch (e) {
-                return false;
-            }
-        }, { timeout: 15000 });
-        
-        console.log('✅ Main iframe ready');
-        await new Promise(resolve => setTimeout(resolve, 1500));
-
-        // Step 3: Verify iframe is accessible
-        console.log('Step 3: Verifying iframe accessibility...');
-        const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
-        
-        if (!iframeAccessible) {
-            console.log('⚠️  Iframe not fully accessible, waiting 2 more seconds...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            const stillNotAccessible = await this.isIframeAccessible('#frm_main_content');
-            if (!stillNotAccessible) {
-                throw new Error('Main iframe not accessible after retries');
-            }
-        }
-        console.log('✅ Iframe verified accessible');
-
-        // Step 4: Click "Add Account" button
-        console.log('Step 4: Clicking Add Account button...');
-        await this.page.evaluate(() => {
-            const iframe = document.querySelector('#frm_main_content');
-            const iframe_document = iframe.contentWindow.document;
-            const buttons = iframe_document.querySelectorAll('#content a');
-            console.log('Found buttons:', buttons.length);
-            console.log('Clicking button index 1 (Add Account)');
-            buttons[1].click();
-        });
-        console.log('✅ Add Account button clicked');
-
-        // Step 5: Wait for dialog to appear
-        console.log('Step 5: Waiting for account creation dialog...');
-        await this.page.waitForSelector('#DialogBySHF iframe', { timeout: 15000 });
-        console.log('✅ Dialog selector found');
-        
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        // Step 6: Verify dialog iframe is accessible
-        console.log('Step 6: Verifying dialog iframe accessibility...');
-        await this.page.waitForFunction(() => {
-            const iframe = document.querySelector('#DialogBySHF iframe');
-            if (!iframe) return false;
-            
-            try {
-                const iframe_document = iframe.contentWindow.document;
-                if (!iframe_document) return false;
-                
-                const accountInput = iframe_document.querySelector('#txtAccount');
-                const nickNameInput = iframe_document.querySelector('#txtNickName');
-                const passInput = iframe_document.querySelector('#txtLogonPass');
-                const pass2Input = iframe_document.querySelector('#txtLogonPass2');
-                const button = iframe_document.querySelector('a');
-                
-                console.log('Form elements found:', {
-                    account: !!accountInput,
-                    nickname: !!nickNameInput,
-                    password: !!passInput,
-                    password2: !!pass2Input,
-                    button: !!button
-                });
-                
-                return accountInput && nickNameInput && passInput && pass2Input && button;
-            } catch (e) {
-                console.log('Error checking dialog iframe:', e.message);
-                return false;
-            }
-        }, { timeout: 10000 });
-        
-        console.log('✅ Dialog iframe verified and form elements ready');
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Step 7: Fill account creation form
-        console.log('Step 7: Filling account creation form...');
-        const formFilled = await this.page.evaluate(({ login, password }) => {
-            try {
-                const iframe = document.querySelector('#DialogBySHF iframe');
-                if (!iframe) {
-                    console.log('Dialog iframe not found');
-                    return false;
-                }
-                
-                const iframe_document = iframe.contentWindow.document;
-                
-                const accountInput = iframe_document.querySelector('#txtAccount');
-                const nickNameInput = iframe_document.querySelector('#txtNickName');
-                const passInput = iframe_document.querySelector('#txtLogonPass');
-                const pass2Input = iframe_document.querySelector('#txtLogonPass2');
-                const button = iframe_document.querySelector('a');
-                
-                if (!accountInput || !nickNameInput || !passInput || !pass2Input || !button) {
-                    console.log('Some form elements not found');
-                    return false;
-                }
-                
-                console.log('Setting account:', login);
-                accountInput.value = login;
-                
-                console.log('Setting nickname:', login);
-                nickNameInput.value = login;
-                
-                console.log('Setting password');
-                passInput.value = password;
-                pass2Input.value = password;
-                
-                console.log('Clicking submit button');
-                button.click();
-                
-                return true;
-            } catch (e) {
-                console.log('Error filling form:', e.message);
-                return false;
-            }
-        }, { login, password });
-
-        if (!formFilled) {
-            throw new Error('Failed to fill account creation form');
-        }
-        console.log('✅ Form filled and submitted');
-
-        // Step 8: Wait for result message
-        console.log('Step 8: Waiting for result message...');
-        await this.page.waitForSelector('#mb_con p', { timeout: 30000 });
-        
-        const message = await this.page.evaluate(() => {
-            const msgEl = document.querySelector('#mb_con p');
-            return msgEl ? msgEl.innerText : 'No message found';
-        });
-        
-        console.log('Result message:', message);
-
-        // Step 9: Close dialogs
-        console.log('Step 9: Closing dialogs...');
-        await this.page.click("#mb_btn_ok");
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        // Try to close the dialog
         try {
-            const closeButton = await this.page.$('#Close');
-            if (closeButton) {
-                await this.page.click('#Close');
-                console.log('✅ Dialog closed');
-            }
-        } catch (e) {
-            console.log('No close button found or already closed');
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Step 10: Process result
-        console.log('Step 10: Processing result...');
-        const successMessages = [
-            "Added successfully",
-            "Users added successfully, but failed to obtain the game ID number, the system will assign you later!"
-        ];
-
-        if (successMessages.includes(message)) {
-            console.log('✅ SUCCESS! Account created');
-            this.log(`New account created ${login}:${password}`);
-
-            // Update database
-            try {
-                const gameAccount = await GameAccount.findById(id);
-                if (gameAccount) {
-                    gameAccount.status = 'active';
-                    gameAccount.gameLogin = login;
-                    gameAccount.gamePassword = password;
-                    
-                    if (!gameAccount.metadata) {
-                        gameAccount.metadata = {};
-                    }
-                    gameAccount.metadata.login = login;
-                    gameAccount.metadata.password = password;
-                    await gameAccount.save();
-                    console.log('✅ Database updated');
-                }
-            } catch (error) {
-                console.log('DB update error:', error.message);
-                this.error(`Error updating account status in DB: ${error.message}`);
-            }
-
-            await Tasks.approve(id);
+            await this.ensureBrowserReady();
             
-            console.log('✅ CREATE ACCOUNT COMPLETE');
-            return {
-                success: true,
-                login: login,
-                password: password
+            const generateRandomString = () => {
+                const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+                let result = '';
+                for (let i = 0; i < 4; i++) {
+                    result += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return result;
             };
             
-        } else {
-            console.log('❌ Account creation failed:', message);
-            this.error(`Error while creating account: ${message}`);
+            const login = `bc${generateRandomString()}_${generateRandomString()}`;
+            const password = `bc${generateRandomString()}_${generateRandomString()}`;
+            
+            console.log(`Generated credentials - Login: ${login}, Password: ${password}`);
 
-            // Update database with failure
+            console.log('Step 1: Checking page state...');
+            const currentPath = await this.page.evaluate(() => location.pathname);
+            console.log('Current path:', currentPath);
+            
+            if (currentPath === '/default.aspx') {
+                throw new Error('Session expired. Please refresh the page.');
+            }
+            console.log('✅ On correct page');
+
+            console.log('Step 2: Waiting for main iframe to be ready...');
+            await this.page.waitForSelector('#frm_main_content', { timeout: 10000 });
+            
+            await this.page.waitForFunction(() => {
+                const iframe = document.querySelector('#frm_main_content');
+                if (!iframe) return false;
+                
+                try {
+                    const iframe_document = iframe.contentWindow.document;
+                    if (!iframe_document) return false;
+                    
+                    const hasContent = iframe_document.querySelector('#txtSearch') !== null;
+                    return iframe_document.readyState === 'complete' && hasContent;
+                } catch (e) {
+                    return false;
+                }
+            }, { timeout: 15000 });
+            
+            console.log('✅ Main iframe ready');
+            await new Promise(resolve => setTimeout(resolve, 1500));
+
+            console.log('Step 3: Verifying iframe accessibility...');
+            const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
+            
+            if (!iframeAccessible) {
+                throw new Error('Page not ready. Please try again.');
+            }
+            console.log('✅ Iframe verified accessible');
+
+            console.log('Step 4: Clicking Add Account button...');
+            await this.page.evaluate(() => {
+                const iframe = document.querySelector('#frm_main_content');
+                const iframe_document = iframe.contentWindow.document;
+                const buttons = iframe_document.querySelectorAll('#content a');
+                buttons[1].click();
+            });
+            console.log('✅ Add Account button clicked');
+
+            console.log('Step 5: Waiting for account creation dialog...');
+            await this.page.waitForSelector('#DialogBySHF iframe', { timeout: 15000 });
+            console.log('✅ Dialog selector found');
+            
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            console.log('Step 6: Verifying dialog iframe accessibility...');
+            await this.page.waitForFunction(() => {
+                const iframe = document.querySelector('#DialogBySHF iframe');
+                if (!iframe) return false;
+                
+                try {
+                    const iframe_document = iframe.contentWindow.document;
+                    if (!iframe_document) return false;
+                    
+                    const accountInput = iframe_document.querySelector('#txtAccount');
+                    const nickNameInput = iframe_document.querySelector('#txtNickName');
+                    const passInput = iframe_document.querySelector('#txtLogonPass');
+                    const pass2Input = iframe_document.querySelector('#txtLogonPass2');
+                    const button = iframe_document.querySelector('a');
+                    
+                    return accountInput && nickNameInput && passInput && pass2Input && button;
+                } catch (e) {
+                    return false;
+                }
+            }, { timeout: 10000 });
+            
+            console.log('✅ Dialog iframe verified and form elements ready');
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            console.log('Step 7: Filling account creation form...');
+            const formFilled = await this.page.evaluate(({ login, password }) => {
+                try {
+                    const iframe = document.querySelector('#DialogBySHF iframe');
+                    if (!iframe) return false;
+                    
+                    const iframe_document = iframe.contentWindow.document;
+                    
+                    const accountInput = iframe_document.querySelector('#txtAccount');
+                    const nickNameInput = iframe_document.querySelector('#txtNickName');
+                    const passInput = iframe_document.querySelector('#txtLogonPass');
+                    const pass2Input = iframe_document.querySelector('#txtLogonPass2');
+                    const button = iframe_document.querySelector('a');
+                    
+                    if (!accountInput || !nickNameInput || !passInput || !pass2Input || !button) {
+                        return false;
+                    }
+                    
+                    accountInput.value = login;
+                    nickNameInput.value = login;
+                    passInput.value = password;
+                    pass2Input.value = password;
+                    
+                    button.click();
+                    
+                    return true;
+                } catch (e) {
+                    return false;
+                }
+            }, { login, password });
+
+            if (!formFilled) {
+                throw new Error('Failed to fill account creation form');
+            }
+            console.log('✅ Form filled and submitted');
+
+            console.log('Step 8: Waiting for result message...');
+            await this.page.waitForSelector('#mb_con p', { timeout: 30000 });
+            
+            const message = await this.page.evaluate(() => {
+                const msgEl = document.querySelector('#mb_con p');
+                return msgEl ? msgEl.innerText : 'No message found';
+            });
+            
+            console.log('Result message:', message);
+
+            console.log('Step 9: Closing dialogs...');
+            await this.page.click("#mb_btn_ok");
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            try {
+                const closeButton = await this.page.$('#Close');
+                if (closeButton) {
+                    await this.page.click('#Close');
+                    console.log('✅ Dialog closed');
+                }
+            } catch (e) {
+                console.log('No close button found or already closed');
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            console.log('Step 10: Processing result...');
+            const successMessages = [
+                "Added successfully",
+                "Users added successfully, but failed to obtain the game ID number, the system will assign you later!"
+            ];
+
+            if (successMessages.includes(message)) {
+                console.log('✅ SUCCESS! Account created');
+                this.log(`New account created ${login}:${password}`);
+
+                try {
+                    const gameAccount = await GameAccount.findById(id);
+                    if (gameAccount) {
+                        gameAccount.status = 'active';
+                        gameAccount.gameLogin = login;
+                        gameAccount.gamePassword = password;
+                        
+                        if (!gameAccount.metadata) {
+                            gameAccount.metadata = {};
+                        }
+                        gameAccount.metadata.login = login;
+                        gameAccount.metadata.password = password;
+                        await gameAccount.save();
+                        console.log('✅ Database updated');
+                    }
+                } catch (error) {
+                    console.log('DB update error:', error.message);
+                }
+
+                await Tasks.approve(id);
+                
+                console.log('✅ CREATE ACCOUNT COMPLETE');
+                return {
+                    success: true,
+                    login: login,
+                    password: password
+                };
+                
+            } else {
+                console.log('❌ Account creation failed:', message);
+                this.error(`Error while creating account: ${message}`);
+
+                try {
+                    const gameAccount = await GameAccount.findById(id);
+                    if (gameAccount) {
+                        gameAccount.status = 'failed';
+                        if (!gameAccount.metadata) {
+                            gameAccount.metadata = {};
+                        }
+                        gameAccount.metadata.notes = message;
+                        await gameAccount.save();
+                    }
+                } catch (error) {
+                    console.log('DB update error:', error.message);
+                }
+
+                await Tasks.error(id, message);
+                throw new Error(message);
+            }
+            
+        } catch (error) {
+            console.log('❌ CREATE ACCOUNT ERROR:', error.message);
+            this.error(`Error creating account: ${error.message}`);
+            
             try {
                 const gameAccount = await GameAccount.findById(id);
                 if (gameAccount) {
@@ -1899,84 +1631,33 @@ async getBalance({ id, login }) {
                     if (!gameAccount.metadata) {
                         gameAccount.metadata = {};
                     }
-                    gameAccount.metadata.notes = message;
+                    gameAccount.metadata.notes = error.message;
                     await gameAccount.save();
-                    console.log('Database updated with failure status');
                 }
-            } catch (error) {
-                console.log('DB update error:', error.message);
-                this.error(`Error updating account status in DB: ${error.message}`);
+            } catch (dbError) {
+                console.log('Failed to update DB with error:', dbError.message);
             }
-
-            await Tasks.error(id, message);
-            return { success: false, message: message };
+            
+            throw error;
         }
-        
-    } catch (error) {
-        console.log('❌ CREATE ACCOUNT ERROR:', error.message);
-        console.log('Stack:', error.stack);
-        this.error(`Error creating account: ${error.message}`);
-        
-        // Handle session errors
-        if (error.message.includes('Session closed') || 
-            error.message.includes('Target closed') ||
-            error.message.includes('detached Frame')) {
-            console.log('Session error detected, reinitializing...');
-            this.browserReady = false;
-            this.initialized = false;
-            await this.reinitialize();
-            return -1;
-        }
-        
-        // Update database with failure
-        try {
-            const gameAccount = await GameAccount.findById(id);
-            if (gameAccount) {
-                gameAccount.status = 'failed';
-                if (!gameAccount.metadata) {
-                    gameAccount.metadata = {};
-                }
-                gameAccount.metadata.notes = error.message;
-                await gameAccount.save();
-            }
-        } catch (dbError) {
-            console.log('Failed to update DB with error:', dbError.message);
-        }
-        
-        // Try to recover
-        try {
-            console.log('Attempting to navigate back to store...');
-            await this.page.goto('https://pandamaster.vip/Store.aspx', {
-                waitUntil: 'networkidle2',
-                timeout: 10000
-            });
-            console.log('Recovery navigation complete');
-        } catch (navError) {
-            console.log('Recovery failed:', navError.message);
-        }
-        
-        return { success: false, message: error.message };
-    }
-}
+    }// PART 3 OF 3 - Lines 1301-End (FINAL)
+// Paste this AFTER Part 2
 
     async recharge({ id, login, amount, remark, is_manual }) {
+        console.log('🔴 RECHARGE START:', { id, login, amount, remark, is_manual });
+        
         try {
-            // Ensure browser is ready
             await this.ensureBrowserReady();
             
             const currentPath = await this.page.evaluate(() => location.pathname);
             
             if (currentPath === '/default.aspx') {
-                this.authorized = false;
-                await this.authorize();
-                return -1;
+                throw new Error('Session expired. Please refresh the page.');
             }
 
-            // Verify iframe is accessible
             const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
             if (!iframeAccessible) {
-                this.error('Iframe not accessible for recharge');
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                throw new Error('Page not ready. Please try again.');
             }
 
             await this.page.evaluate(login => {
@@ -2014,9 +1695,7 @@ async getBalance({ id, login }) {
             }, login);
 
             if (!login_selected) {
-                this.error(`Error while deposit: login ${login} not found!`);
-                await Tasks.error(id, 'login not found');
-                return false;
+                throw new Error(`Account ${login} not found`);
             }
 
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -2026,7 +1705,6 @@ async getBalance({ id, login }) {
                 const iframe_document = iframe.contentWindow.document;
                 const links = iframe_document.querySelectorAll('.btn12');
                 links[2].click();
-                return true;
             });
 
             await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
@@ -2042,14 +1720,7 @@ async getBalance({ id, login }) {
             });
 
             if (current_balance >= 2) {
-                this.error(`Could not deposit ${amount} to login ${login} (Balance more than $2 -> ${current_balance})`);
-                
-                if (is_manual) {
-                    await Tasks.cancel(id, ` balance is more than $2 (${current_balance})`);
-                }
-                
-                await Tasks.error(id, `balance is more than $2 (${current_balance})`);
-                return false;
+                throw new Error(`Balance is more than $2 (${current_balance}). Cannot recharge.`);
             }
 
             const session_amount = await this.page.evaluate(({ amount, remark }) => {
@@ -2073,8 +1744,7 @@ async getBalance({ id, login }) {
             }, { amount, remark });
 
             if (!session_amount) {
-                await Tasks.error(id, `session amount doesn't exist`);
-                return false;
+                throw new Error('Failed to submit recharge form');
             }
 
             await this.page.waitForSelector('#mb_con p', { timeout: 60000 });
@@ -2090,7 +1760,6 @@ async getBalance({ id, login }) {
             if (result === "Confirmed successful") {
                 this.log(`Successfully deposit ${amount} to login ${login}`);
                 
-                // Update database
                 try {
                     const gameAccount = await GameAccount.findOne({ gameLogin: login });
                     if (gameAccount) {
@@ -2102,30 +1771,20 @@ async getBalance({ id, login }) {
                 
                 await Tasks.approve(id, session_amount);
                 
-                // Invalidate admin balance cache
                 this.cache.adminBalance = null;
                 this.cache.adminBalanceTimestamp = null;
                 
+                console.log('✅ RECHARGE COMPLETE');
                 return true;
             } else {
-                this.log(`Error while deposit ${amount} to login ${login}`);
-                await Tasks.error(id, `wrong message: ${result}`);
-                return false;
+                throw new Error(`Recharge failed: ${result}`);
             }
 
         } catch (error) {
+            console.log('❌ RECHARGE ERROR:', error.message);
             this.error(`Error during recharge: ${error.message}`);
-            
-            // Handle session errors
-            if (error.message.includes('Session closed') || 
-                error.message.includes('Target closed')) {
-                this.browserReady = false;
-                this.initialized = false;
-                await this.reinitialize();
-                return -1;
-            }
-            
-            return false;
+            await Tasks.error(id, error.message);
+            throw error;
         }
     }
 
@@ -2133,37 +1792,25 @@ async getBalance({ id, login }) {
         console.log('🔴 REDEEM START:', { id, login, amount, remark, is_manual });
         
         try {
-            // Ensure browser is ready
             await this.ensureBrowserReady();
             
-            // Step 1: Check page state
-            console.log('Step 1: Checking page state...');
             const currentPath = await this.page.evaluate(() => location.pathname);
-            console.log('Current path:', currentPath);
             
             if (currentPath === '/default.aspx') {
-                console.log('Need to authorize, returning -1');
-                this.authorized = false;
-                await this.authorize();
-                return -1;
+                throw new Error('Session expired. Please refresh the page.');
             }
 
-            // Verify iframe is accessible
             const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
             if (!iframeAccessible) {
-                this.error('Iframe not accessible for redeem');
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                throw new Error('Page not ready. Please try again.');
             }
 
-            // Step 2: Search for account
-            console.log('Step 2: Searching for account...');
             await this.page.evaluate(login => {
                 const iframe = document.querySelector('#frm_main_content');
                 const iframe_document = iframe.contentWindow.document;
 
                 const checkbox = iframe_document.querySelector('#ShowHideAccount_0');
                 if (checkbox && !checkbox.checked) {
-                    console.log('Clicking checkbox to show hidden accounts');
                     checkbox.click();
                 }
 
@@ -2171,8 +1818,6 @@ async getBalance({ id, login }) {
                 iframe_document.querySelectorAll('#content a')[0].click();
             }, login);
 
-            // Step 3: Wait for search results
-            console.log('Step 3: Waiting for search results...');
             await this.page.waitForFunction((login) => {
                 const iframe = document.querySelector('#frm_main_content');
                 if (!iframe) return false;
@@ -2180,105 +1825,64 @@ async getBalance({ id, login }) {
                 const items = iframe_document.querySelectorAll('#item tr');
                 return items.length >= 2;
             }, { timeout: 5000 }, login);
-            console.log('Search results loaded');
 
             await new Promise(resolve => setTimeout(resolve, 1000));
 
-            // Step 4: Select account
-            console.log('Step 4: Selecting account...');
             const login_selected = await this.page.evaluate(login => {
                 const iframe = document.querySelector('#frm_main_content');
                 const iframe_document = iframe.contentWindow.document;
                 const items = iframe_document.querySelectorAll('#item tr');
 
-                console.log('Found rows:', items.length);
-
-                if (items.length < 2) {
-                    console.log('No results found');
-                    return false;
-                }
+                if (items.length < 2) return false;
 
                 for (let i = 1; i < items.length; i++) {
                     const tds = items[i].querySelectorAll('td');
                     const accountName = tds[2].innerText.trim().toLowerCase();
-                    console.log('Row', i, ':', accountName);
                     
                     if (accountName === login.toLowerCase()) {
-                        console.log('Found match at row', i);
                         tds[0].querySelector('a').click();
                         return true;
                     }
                 }
                 
-                console.log('No matching account found');
                 return false;
             }, login);
 
             if (!login_selected) {
-                const errorMsg = `Login ${login} not found in redeem`;
-                console.log('❌', errorMsg);
-                this.error(errorMsg);
-                await Tasks.error(id, 'login not found');
-                return false;
+                throw new Error(`Account ${login} not found`);
             }
-            console.log('✅ Account selected');
 
             await new Promise(resolve => setTimeout(resolve, 1000));
 
-            // Step 5: Click redeem button
-            console.log('Step 5: Clicking redeem button...');
             await this.page.evaluate(() => {
                 const iframe = document.querySelector('#frm_main_content');
                 const iframe_document = iframe.contentWindow.document;
                 const links = iframe_document.querySelectorAll('.btn12');
-                console.log('Found buttons:', links.length);
-                console.log('Clicking button index 3 (redeem)');
                 links[3].click();
-                return true;
             });
 
-            // Step 6: Wait for redeem dialog
-            console.log('Step 6: Waiting for redeem dialog...');
             await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
             await new Promise(resolve => setTimeout(resolve, 1000));
-            console.log('✅ Dialog opened');
 
-            // Step 7: Read current balance
-            console.log('Step 7: Reading current balance...');
             const current_balance = await this.page.evaluate(() => {
                 const iframe = document.querySelector('#Container iframe');
-                if (!iframe) {
-                    console.log('Container iframe not found');
-                    return false;
-                }
+                if (!iframe) return false;
                 
                 const iframe_document = iframe.contentWindow.document;
                 const balance_input = iframe_document.querySelector('#txtLeScore');
 
-                if (!balance_input) {
-                    console.log('Balance input not found');
-                    return false;
-                }
+                if (!balance_input) return false;
                 
                 const balanceValue = balance_input.value;
-                console.log('Balance input value:', balanceValue);
                 return parseFloat(parseFloat(balanceValue).toFixed(2));
             });
 
-            console.log('Current balance:', current_balance);
-
             if (current_balance === false) {
-                const errorMsg = 'Could not read balance from redeem dialog';
-                console.log('❌', errorMsg);
-                await Tasks.error(id, errorMsg);
-                return false;
+                throw new Error('Could not read balance from redeem dialog');
             }
 
-            // Step 8: Validate balance
-            console.log('Step 8: Validating balance...');
             if (!is_manual) {
                 if (parseInt(current_balance) !== parseInt(amount)) {
-                    console.log(`⚠️  Balance mismatch: Expected ${amount}, got ${current_balance}`);
                     await Tasks.cancel(id, parseInt(current_balance));
                     return true;
                 }
@@ -2286,21 +1890,14 @@ async getBalance({ id, login }) {
 
             if (is_manual) {
                 if (parseInt(current_balance) < parseInt(amount)) {
-                    console.log(`⚠️  Insufficient balance: Has ${current_balance}, needs ${amount}`);
                     await Tasks.cancel(id, parseInt(current_balance));
                     return true;
                 }
             }
-            console.log('✅ Balance validated');
 
-            // Step 9: Fill redeem form
-            console.log('Step 9: Filling redeem form...');
             const processed = await this.page.evaluate(({ amount, remark }) => {
                 const iframe = document.querySelector('#Container iframe');
-                if (!iframe) {
-                    console.log('Container iframe not found');
-                    return false;
-                }
+                if (!iframe) return false;
                 
                 const iframe_document = iframe.contentWindow.document;
 
@@ -2308,40 +1905,19 @@ async getBalance({ id, login }) {
                 const remark_input = iframe_document.querySelector('#txtReason');
                 const button = iframe_document.querySelector('#Button1');
 
-                if (!amount_input) {
-                    console.log('Amount input not found');
-                    return false;
-                }
-                if (!remark_input) {
-                    console.log('Remark input not found');
-                    return false;
-                }
-                if (!button) {
-                    console.log('Submit button not found');
-                    return false;
-                }
+                if (!amount_input || !remark_input || !button) return false;
 
-                console.log('Setting amount:', amount);
-                console.log('Setting remark:', remark);
                 amount_input.value = amount;
                 remark_input.value = remark;
-                
-                console.log('Clicking submit button');
                 button.click();
 
                 return true;
             }, { amount, remark });
 
             if (!processed) {
-                const errorMsg = 'Failed to fill redeem form';
-                console.log('❌', errorMsg);
-                await Tasks.error(id, errorMsg);
-                return false;
+                throw new Error('Failed to fill redeem form');
             }
-            console.log('✅ Form submitted');
 
-            // Step 10: Wait for result
-            console.log('Step 10: Waiting for result message...');
             await this.page.waitForSelector('#mb_con p', { timeout: 30000 });
 
             const result = await this.page.evaluate(() => {
@@ -2351,33 +1927,24 @@ async getBalance({ id, login }) {
                 return messageEl ? messageEl.innerText : 'No message found';
             });
 
-            console.log('Result message:', result);
-
             await this.page.click("#mb_btn_ok");
             await new Promise(resolve => setTimeout(resolve, 500));
 
-            // Step 11: Process result
-            console.log('Step 11: Processing result...');
             if (result === "Confirmed successful") {
                 const newBalance = parseFloat((current_balance - amount).toFixed(2));
-                console.log('✅ SUCCESS! New balance:', newBalance);
                 this.log(`Successfully cashout ${amount} from login ${login}`);
                 
-                // Update database
                 try {
                     const gameAccount = await GameAccount.findOne({ gameLogin: login });
                     if (gameAccount) {
                         await gameAccount.updateBalance(newBalance, id);
-                        console.log('Database updated with new balance');
                     }
                 } catch (dbError) {
-                    console.log('DB update error:', dbError.message);
                     this.error(`Error updating balance in DB: ${dbError.message}`);
                 }
                 
                 await Tasks.approve(id, newBalance);
                 
-                // Invalidate admin balance cache
                 this.cache.adminBalance = null;
                 this.cache.adminBalanceTimestamp = null;
                 
@@ -2386,316 +1953,181 @@ async getBalance({ id, login }) {
                 
             } else {
                 if (result === "Sorry, there is not enough gold for the operator!") {
-                    console.log('⚠️  Insufficient operator funds');
                     await Tasks.cancel(id);
                 } else {
-                    console.log('❌ Unexpected result:', result);
+                    await Tasks.error(id, result);
                 }
-                this.log(`Error while cashout ${amount} from login ${login}: ${result}`);
-                await Tasks.error(id, result);
-                return false;
+                throw new Error(`Redeem failed: ${result}`);
             }
 
         } catch (error) {
             console.log('❌ REDEEM ERROR:', error.message);
-            console.log('Stack:', error.stack);
             this.error(`Error during redeem: ${error.message}`);
-            
-            // Handle session errors
-            if (error.message.includes('Session closed') || 
-                error.message.includes('Target closed') ||
-                error.message.includes('detached Frame')) {
-                this.browserReady = false;
-                this.initialized = false;
-                await this.reinitialize();
-                return -1;
-            }
-            
-            // Try to recover
-            try {
-                console.log('Attempting to navigate back to store...');
-                await this.page.goto('https://firekirin.xyz:8888/Store.aspx', {
-                    waitUntil: 'networkidle2',
-                    timeout: 10000
-                });
-                console.log('Recovery navigation complete');
-            } catch (navError) {
-                console.log('Recovery failed:', navError.message);
-            }
-            
-            return false;
+            throw error;
         }
     }
 
-   async resetPassword({ id, login, password }) {
-       console.log('🔴 RESET PASSWORD START:', { id, login, password: '***' });
-       
-       try {
-           // Ensure browser is ready
-           await this.ensureBrowserReady();
-           
-           // Step 1: Check page state
-           console.log('Step 1: Checking page state...');
-           const currentPath = await this.page.evaluate(() => location.pathname);
-           console.log('Current path:', currentPath);
-           
-           if (currentPath === '/default.aspx') {
-               console.log('Need to authorize, returning -1');
-               this.authorized = false;
-               await this.authorize();
-               return -1;
-           }
-   
-           // Verify iframe is accessible
-           const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
-           if (!iframeAccessible) {
-               this.error('Iframe not accessible for password reset');
-               await new Promise(resolve => setTimeout(resolve, 2000));
-           }
-   
-           // Step 2: Search for account
-           console.log('Step 2: Searching for account...');
-           await this.page.evaluate(login => {
-               const iframe = document.querySelector('#frm_main_content');
-               const iframe_document = iframe.contentWindow.document;
-   
-               const checkbox = iframe_document.querySelector('#ShowHideAccount_0');
-               if (checkbox && !checkbox.checked) {
-                   console.log('Clicking checkbox to show hidden accounts');
-                   checkbox.click();
-               }
-   
-               iframe_document.querySelector('#txtSearch').value = login;
-               iframe_document.querySelectorAll('#content a')[0].click();
-           }, login);
-   
-           // Step 3: Wait for search results
-           console.log('Step 3: Waiting for search results...');
-           await this.page.waitForFunction((login) => {
-               const iframe = document.querySelector('#frm_main_content');
-               if (!iframe) return false;
-               const iframe_document = iframe.contentWindow.document;
-               const items = iframe_document.querySelectorAll('#item tr');
-               return items.length >= 2;
-           }, { timeout: 5000 }, login);
-           console.log('Search results loaded');
-   
-           await new Promise(resolve => setTimeout(resolve, 1000));
-   
-           // Step 4: Select account
-           console.log('Step 4: Selecting account...');
-           const login_selected = await this.page.evaluate(login => {
-               const iframe = document.querySelector('#frm_main_content');
-               const iframe_document = iframe.contentWindow.document;
-               const items = iframe_document.querySelectorAll('#item tr');
-   
-               console.log('Found rows:', items.length);
-   
-               if (items.length < 2) {
-                   console.log('No results found');
-                   return false;
-               }
-   
-               for (let i = 1; i < items.length; i++) {
-                   const tds = items[i].querySelectorAll('td');
-                   const accountName = tds[2].innerText.trim().toLowerCase();
-                   console.log('Row', i, ':', accountName);
-                   
-                   if (accountName === login.toLowerCase()) {
-                       console.log('Found match at row', i);
-                       tds[0].querySelector('a').click();
-                       return true;
-                   }
-               }
-               
-               console.log('No matching account found');
-               return false;
-           }, login);
-   
-           if (!login_selected) {
-               const errorMsg = `Login ${login} not found in password reset`;
-               console.log('❌', errorMsg);
-               this.error(errorMsg);
-               await Tasks.error(id, 'login not found');
-               return false;
-           }
-           console.log('✅ Account selected');
-   
-           await new Promise(resolve => setTimeout(resolve, 1000));
-   
-           // Step 5: Click reset password button
-           console.log('Step 5: Clicking reset password button...');
-           await this.page.evaluate(() => {
-               const iframe = document.querySelector('#frm_main_content');
-               const iframe_document = iframe.contentWindow.document;
-               const links = iframe_document.querySelectorAll('.btn13');
-               console.log('Found buttons:', links.length);
-               console.log('Clicking button index 2 (reset password)');
-               links[1].click();
-               return true;
-           });
-   
-           // Step 6: Wait for reset password dialog
-           console.log('Step 6: Waiting for reset password dialog...');
-           await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
-           await new Promise(resolve => setTimeout(resolve, 1000));
-           console.log('✅ Dialog opened');
-   
-           // Step 7: Wait for form elements to be ready inside iframe
-           console.log('Step 7: Waiting for form elements to load...');
-           await this.page.waitForFunction(() => {
-               const iframe = document.querySelector('#Container iframe');
-               if (!iframe) return false;
-               
-               try {
-                   const iframe_document = iframe.contentWindow.document;
-                   const new_password = iframe_document.querySelector('#txtConfirmPass');
-                   const confirm_password = iframe_document.querySelector('#txtSureConfirmPass');
-                   const button = iframe_document.querySelector('#Button1');
-                   
-                   console.log('Checking form elements:', {
-                       new_password: !!new_password,
-                       confirm_password: !!confirm_password,
-                       button: !!button
-                   });
-                   
-                   return new_password && confirm_password && button;
-               } catch (e) {
-                   console.log('Error accessing iframe:', e.message);
-                   return false;
-               }
-           }, { timeout: 10000 });
-   
-           console.log('✅ Form elements loaded');
-           await new Promise(resolve => setTimeout(resolve, 500));
-   
-           // Step 8: Fill reset password form
-           console.log('Step 8: Filling reset password form...');
-           const processed = await this.page.evaluate(({ password }) => {
-               const iframe = document.querySelector('#Container iframe');
-               if (!iframe) {
-                   console.log('Container iframe not found');
-                   return false;
-               }
-               
-               const iframe_document = iframe.contentWindow.document;
-   
-               const new_password = iframe_document.querySelector('#txtConfirmPass');
-               const confirm_password = iframe_document.querySelector('#txtSureConfirmPass');
-               const button = iframe_document.querySelector('#Button1');
-   
-               if (!new_password) {
-                   console.log('New password input not found');
-                   return false;
-               }
-               if (!confirm_password) {
-                   console.log('Confirm password input not found');
-                   return false;
-               }
-               if (!button) {
-                   console.log('Submit button not found');
-                   return false;
-               }
-   
-               console.log('Setting new password');
-               new_password.value = password;
-               confirm_password.value = password;
-               
-               console.log('Clicking submit button');
-               button.click();
-   
-               return true;
-           }, { password });
-   
-           if (!processed) {
-               const errorMsg = 'Failed to fill reset password form';
-               console.log('❌', errorMsg);
-               await Tasks.error(id, errorMsg);
-               return false;
-           }
-           console.log('✅ Form submitted');
-   
-           // Step 9: Wait for result
-           console.log('Step 9: Waiting for result message...');
-           await this.page.waitForSelector('#mb_con p', { timeout: 30000 });
-   
-           const result = await this.page.evaluate(() => {
-               const closeButton = document.querySelector('#Close');
-               if (closeButton) closeButton.click();
-               const messageEl = document.querySelector('#mb_con p');
-               return messageEl ? messageEl.innerText : 'No message found';
-           });
-   
-           console.log('Result message:', result);
-   
-           await this.page.click("#mb_btn_ok");
-           await new Promise(resolve => setTimeout(resolve, 500));
-   
-           // Step 10: Process result
-           console.log('Step 10: Processing result...');
-           if (result === "Modified success!") {
-               console.log('✅ SUCCESS! Password reset complete');
-               this.log(`Password for login ${login} has been restored!`);
-               
-               // Update database
-               try {
-                   const gameAccount = await GameAccount.findOne({ gameLogin: login });
-                   if (gameAccount) {
-                       gameAccount.gamePassword = password;
-                       await gameAccount.save();
-                       console.log('Database updated with new password');
-                   }
-               } catch (dbError) {
-                   console.log('DB update error:', dbError.message);
-                   this.error(`Error updating password in DB: ${dbError.message}`);
-               }
-               
-               await Tasks.approve(id, password);
-               
-               console.log('✅ RESET PASSWORD COMPLETE');
-               return true;
-               
-           } else {
-               console.log('❌ Unexpected result:', result);
-               this.log(`Error while reset password -> ${result}`);
-               await Tasks.error(id, `password reset failed: ${result}`);
-               return false;
-           }
-   
-       } catch (error) {
-           console.log('❌ RESET PASSWORD ERROR:', error.message);
-           console.log('Stack:', error.stack);
-           this.error(`Error during password reset: ${error.message}`);
-           
-           // Handle session errors
-           if (error.message.includes('Session closed') || 
-               error.message.includes('Target closed') ||
-               error.message.includes('detached Frame')) {
-               this.browserReady = false;
-               this.initialized = false;
-               await this.reinitialize();
-               return -1;
-           }
-           
-           // Try to recover
-           try {
-               console.log('Attempting to navigate back to store...');
-               await this.page.goto('https://firekirin.xyz:8888/Store.aspx', {
-                   waitUntil: 'networkidle2',
-                   timeout: 10000
-               });
-               console.log('Recovery navigation complete');
-           } catch (navError) {
-               console.log('Recovery failed:', navError.message);
-           }
-           
-           return false;
-       }
-   }
+    async resetPassword({ id, login, password }) {
+        console.log('🔴 RESET PASSWORD START:', { id, login, password: '***' });
+        
+        try {
+            await this.ensureBrowserReady();
+            
+            const currentPath = await this.page.evaluate(() => location.pathname);
+            
+            if (currentPath === '/default.aspx') {
+                throw new Error('Session expired. Please refresh the page.');
+            }
+
+            const iframeAccessible = await this.isIframeAccessible('#frm_main_content');
+            if (!iframeAccessible) {
+                throw new Error('Page not ready. Please try again.');
+            }
+
+            await this.page.evaluate(login => {
+                const iframe = document.querySelector('#frm_main_content');
+                const iframe_document = iframe.contentWindow.document;
+
+                const checkbox = iframe_document.querySelector('#ShowHideAccount_0');
+                if (checkbox && !checkbox.checked) {
+                    checkbox.click();
+                }
+
+                iframe_document.querySelector('#txtSearch').value = login;
+                iframe_document.querySelectorAll('#content a')[0].click();
+            }, login);
+
+            await this.page.waitForFunction((login) => {
+                const iframe = document.querySelector('#frm_main_content');
+                if (!iframe) return false;
+                const iframe_document = iframe.contentWindow.document;
+                const items = iframe_document.querySelectorAll('#item tr');
+                return items.length >= 2;
+            }, { timeout: 5000 }, login);
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            const login_selected = await this.page.evaluate(login => {
+                const iframe = document.querySelector('#frm_main_content');
+                const iframe_document = iframe.contentWindow.document;
+                const items = iframe_document.querySelectorAll('#item tr');
+
+                if (items.length < 2) return false;
+
+                for (let i = 1; i < items.length; i++) {
+                    const tds = items[i].querySelectorAll('td');
+                    const accountName = tds[2].innerText.trim().toLowerCase();
+                    
+                    if (accountName === login.toLowerCase()) {
+                        tds[0].querySelector('a').click();
+                        return true;
+                    }
+                }
+                
+                return false;
+            }, login);
+
+            if (!login_selected) {
+                throw new Error(`Account ${login} not found`);
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            await this.page.evaluate(() => {
+                const iframe = document.querySelector('#frm_main_content');
+                const iframe_document = iframe.contentWindow.document;
+                const links = iframe_document.querySelectorAll('.btn13');
+                links[1].click();
+            });
+
+            await this.page.waitForSelector('#Container iframe', { timeout: 10000 });
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            await this.page.waitForFunction(() => {
+                const iframe = document.querySelector('#Container iframe');
+                if (!iframe) return false;
+                
+                try {
+                    const iframe_document = iframe.contentWindow.document;
+                    const new_password = iframe_document.querySelector('#txtConfirmPass');
+                    const confirm_password = iframe_document.querySelector('#txtSureConfirmPass');
+                    const button = iframe_document.querySelector('#Button1');
+                    
+                    return new_password && confirm_password && button;
+                } catch (e) {
+                    return false;
+                }
+            }, { timeout: 10000 });
+
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const processed = await this.page.evaluate(({ password }) => {
+                const iframe = document.querySelector('#Container iframe');
+                if (!iframe) return false;
+                
+                const iframe_document = iframe.contentWindow.document;
+
+                const new_password = iframe_document.querySelector('#txtConfirmPass');
+                const confirm_password = iframe_document.querySelector('#txtSureConfirmPass');
+                const button = iframe_document.querySelector('#Button1');
+
+                if (!new_password || !confirm_password || !button) return false;
+
+                new_password.value = password;
+                confirm_password.value = password;
+                button.click();
+
+                return true;
+            }, { password });
+
+            if (!processed) {
+                throw new Error('Failed to fill reset password form');
+            }
+
+            await this.page.waitForSelector('#mb_con p', { timeout: 30000 });
+
+            const result = await this.page.evaluate(() => {
+                const closeButton = document.querySelector('#Close');
+                if (closeButton) closeButton.click();
+                const messageEl = document.querySelector('#mb_con p');
+                return messageEl ? messageEl.innerText : 'No message found';
+            });
+
+            await this.page.click("#mb_btn_ok");
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            if (result === "Modified success!") {
+                this.log(`Password for login ${login} has been restored!`);
+                
+                try {
+                    const gameAccount = await GameAccount.findOne({ gameLogin: login });
+                    if (gameAccount) {
+                        gameAccount.gamePassword = password;
+                        await gameAccount.save();
+                    }
+                } catch (dbError) {
+                    this.error(`Error updating password in DB: ${dbError.message}`);
+                }
+                
+                await Tasks.approve(id, password);
+                
+                console.log('✅ RESET PASSWORD COMPLETE');
+                return true;
+                
+            } else {
+                await Tasks.error(id, `password reset failed: ${result}`);
+                throw new Error(`Password reset failed: ${result}`);
+            }
+
+        } catch (error) {
+            console.log('❌ RESET PASSWORD ERROR:', error.message);
+            this.error(`Error during password reset: ${error.message}`);
+            throw error;
+        }
+    }
 
     async getBalanceAdmin(task) {
         try {
-            // Ensure browser is ready
             await this.ensureBrowserReady();
             
             const balance = await this.page.evaluate(() => {
@@ -2710,7 +2142,6 @@ async getBalance({ id, login }) {
             if (balance !== null && !isNaN(balance)) {
                 this.log(`Current admin balance: ${balance}`);
                 
-                // Update cache
                 this.cache.adminBalance = balance;
                 this.cache.adminBalanceTimestamp = Date.now();
                 
@@ -2718,21 +2149,59 @@ async getBalance({ id, login }) {
                 return balance;
             }
 
-            this.error('Could not retrieve admin balance');
-            return false;
+            throw new Error('Could not retrieve admin balance');
         } catch (error) {
             this.error(`Error in getBalanceAdmin: ${error.message}`);
-            
-            // Handle session errors
-            if (error.message.includes('Session closed') || 
-                error.message.includes('Target closed')) {
-                this.browserReady = false;
-                this.initialized = false;
-                await this.reinitialize();
-                return -1;
+            throw error;
+        }
+    }
+
+    async checkQueue() {
+        try {
+            const task = await Tasks.get('pandamaster');
+
+            if (!task) {
+                return setTimeout(this.checkQueue.bind(this), 1000);
             }
-            
-            return false;
+
+            console.log('Processing task:', task);
+
+            let task_result = null;
+
+            switch (task.type) {
+                case 'get_balance':
+                    task_result = await this.getBalance(task);
+                    break;
+                case 'get_admin_balance':
+                    task_result = await this.getBalanceAdmin(task);
+                    break;
+                case 'recharge':
+                    task_result = await this.recharge(task);
+                    break;
+                case 'redeem':
+                    task_result = await this.redeem(task);
+                    break;
+                case 'create':
+                    task_result = await this.createAccount(task);
+                    break;
+                case 'reset':
+                    task_result = await this.resetPassword(task);
+                    break;
+                case 'download_code':
+                    task_result = await this.getDownloadCode(task);
+                    break;
+                default:
+                    this.error(`Unknown task type: ${task.type}`);
+            }
+
+            if (task_result === -1) {
+                return;
+            }
+
+            return setTimeout(this.checkQueue.bind(this), 5000);
+        } catch (error) {
+            this.error(`Error in checkQueue: ${error.message}`);
+            setTimeout(this.checkQueue.bind(this), 5000);
         }
     }
 }

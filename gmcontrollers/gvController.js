@@ -1,4 +1,5 @@
-// controllers/GameVaultController.js - FIXED VERSION
+// controllers/GameVaultController.js - REFACTORED TO MATCH JUWA PATTERN
+// PART 1 OF 3 - Lines 1-500
 const Puppeteer = require('puppeteer');
 const Captcha = require('../lib/captcha.js');
 const { writeFileSync, readFileSync, existsSync, readdirSync, rmSync } = require('fs');
@@ -10,145 +11,200 @@ const path = require('path');
 const axios = require('axios');
 
 class GameVaultController {
-    constructor() {
-        this.browser = null;
-        this.page = null;
-        this.cookies = null;
-        this.authorized = false;
-        this.logger = Logger('GameVault');
-        this.gameType = 'gv';
-        this.initialized = false;
-        this.agentCredentials = null;
-        
-        this.keepAlive = true;
-        this.lastActivity = Date.now();
-        this.activityTimeout = 5 * 60 * 1000;
-        
-        this.cache = {
-            adminBalance: null,
-            adminBalanceTimestamp: null,
-            cacheDuration: 30 * 1000
-        };
+   constructor() {
+    this.browser = null;
+    this.page = null;
+    this.cookies = null;
+    this.authorized = false;
+    this.logger = Logger('GameVault');
+    this.gameType = 'gv';
+    this.initialized = false;
+    this.agentCredentials = null;
+    
+    this.keepAlive = true;
+    this.lastActivity = Date.now();
+    this.activityTimeout = 5 * 60 * 1000;
+    
+    this.cache = {
+        adminBalance: null,
+        adminBalanceTimestamp: null,
+        cacheDuration: 30 * 1000
+    };
 
-        // QUEUE SYSTEM
-        this.requestQueue = [];
-        this.isProcessingQueue = false;
-        this.maxConcurrentRequests = 1;
+    // INITIALIZATION STATE
+    this.isInitializing = false;
+    this.initializationPromise = null;
+    this.browserReady = false;
 
-        // INITIALIZATION STATE
-        this.isInitializing = false;
-        this.initializationPromise = null;
-        this.browserReady = false;
+    // AUTHORIZATION STATE
+    this.isAuthorizing = false;
+    this.authorizationPromise = null;
+    this.authorizationInProgress = false;
 
-        // AUTHORIZATION STATE
-        this.isAuthorizing = false;
-        this.authorizationPromise = null;
-        this.authorizationInProgress = false;
+    // RETRY LIMIT TRACKING
+    this.authRetryCount = 0;
+    this.maxAuthRetries = 3;
+    this.lastAuthAttempt = null;
+    this.authResetInterval = 5 * 60 * 1000; // Reset counter after 5 minutes
 
-        // SESSION MANAGEMENT
-        this.sessionTimeout = null;
-        this.lastSuccessfulOperation = Date.now();
-        this.consecutiveErrors = 0;
-        this.maxConsecutiveErrors = 3;
+    // SESSION MANAGEMENT
+    this.sessionTimeout = null;
+    this.lastSuccessfulOperation = Date.now();
+    this.consecutiveErrors = 0;
+    this.maxConsecutiveErrors = 3;
+    this.consecutiveMonitorFailures = 0;
+    this.maxMonitorFailures = 5;
 
-        this.loadAgentCredentials().catch(err => {
-            this.error(`Failed to load credentials on startup: ${err.message}`);
+    // ⭐ AUTO-INITIALIZE - Start browser when controller is created
+    this.loadAgentCredentials()
+        .then(() => {
+            this.log('Credentials loaded, starting browser initialization...');
+            return this.initialize();
+        })
+        .then(() => {
+            this.log('✅ Browser initialized and ready');
+        })
+        .catch(err => {
+            this.error(`Failed to initialize on startup: ${err.message}`);
         });
 
-        this.startSessionMonitor();
+    this.startSessionMonitor();
 
-        process.on('unhandledRejection', e => {
-            this.logger.error(e);
-        });
+    process.on('unhandledRejection', e => {
+        this.logger.error(e);
+    });
 
-        process.on('uncaughtException', e => {
-            this.logger.error(e);
-        });
-    }
+    process.on('uncaughtException', e => {
+        this.logger.error(e);
+    });
+}
 
     log(log) { this.logger.log(`${log}`) }
     error(log) { this.logger.error(`${log}`) }
+
+    // RESET AUTH RETRY COUNTER IF ENOUGH TIME HAS PASSED
+    resetAuthRetryIfNeeded() {
+        if (this.lastAuthAttempt && 
+            Date.now() - this.lastAuthAttempt > this.authResetInterval) {
+            this.log('Resetting auth retry counter after timeout');
+            this.authRetryCount = 0;
+        }
+    }
 
     // ========================================
     // HTTP REQUEST HELPER
     // ========================================
 
-    async makeRequest({ url, method, body }) {
-        try {
-            const sessionPath = path.join(__dirname, 'sessiongv.json');
-            
-            if (!existsSync(sessionPath)) {
-                this.error('Session file not found. Need to login first.');
+   async makeRequest({ url, method, body }) {
+    try {
+        const sessionPath = path.join(__dirname, 'sessiongv.json');
+        
+        // ⭐ If no session during startup, wait for initialization
+        if (!existsSync(sessionPath)) {
+            // Check if we're initializing
+            if (this.isInitializing || this.isAuthorizing) {
+                this.log('Session not ready yet, waiting for initialization...');
+                
+                // Wait for initialization to complete
+                if (this.initializationPromise) {
+                    await this.initializationPromise;
+                }
+                
+                // Wait for authorization to complete
+                if (this.authorizationPromise) {
+                    await this.authorizationPromise;
+                }
+                
+                // Wait a bit for session file to be written
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                
+                // Check if session file exists now
+                if (!existsSync(sessionPath)) {
+                    this.error('Session file still not found after initialization');
+                    return {
+                        code: 401,
+                        status: 401,
+                        msg: 'Session not found'
+                    };
+                }
+                
+                // ✅ Session file now exists, continue to make the request
+                this.log('✅ Session file ready after waiting, proceeding with request...');
+            } else {
+                this.error('Session file not found and not initializing. Need to login first.');
                 return {
                     code: 401,
                     status: 401,
                     msg: 'Session not found'
                 };
             }
+        }
 
-            const buffer = readFileSync(sessionPath);
-            const json = buffer.toString();
-            const session_details = JSON.parse(json);
+        // ⭐ Read session file (this code runs for both cases now)
+        const buffer = readFileSync(sessionPath);
+        const json = buffer.toString();
+        const session_details = JSON.parse(json);
 
-            if (!session_details.token) {
-                this.error('No token found in session file');
-                return {
-                    code: 401,
-                    status: 401,
-                    msg: 'Token not found'
-                };
-            }
-
-            const response = await axios({
-                url,
-                method,
-                headers: {
-                    "Authorization": `Bearer ${session_details.token}`,
-                    "Content-Type": "application/json"
-                },
-                data: body,
-                validateStatus: () => true
-            });
-
-            this.log(`${method} ${url} - Status: ${response.status}`);
-
-            if (response.data) {
-                return response.data;
-            }
-
+        if (!session_details.token) {
+            this.error('No token found in session file');
             return {
-                code: response.status,
-                status: response.status,
-                msg: response.statusText || 'No response data'
+                code: 401,
+                status: 401,
+                msg: 'Token not found'
             };
+        }
 
-        } catch (error) {
-            this.error(`Request error: ${error.message}`);
-            
-            if (error.response) {
-                this.error(`Status: ${error.response.status}, Message: ${error.response.statusText}`);
-                return {
-                    code: error.response.status,
-                    status: error.response.status,
-                    msg: error.response.data?.msg || error.response.statusText
-                };
-            } else if (error.request) {
-                this.error('No response received from server');
-                return {
-                    code: 500,
-                    status: 500,
-                    msg: 'No response from server'
-                };
-            } else {
-                this.error(`Setup error: ${error.message}`);
-                return {
-                    code: 500,
-                    status: 500,
-                    msg: error.message
-                };
-            }
+        // ⭐ Make the actual HTTP request
+        const response = await axios({
+            url,
+            method,
+            headers: {
+                "Authorization": `Bearer ${session_details.token}`,
+                "Content-Type": "application/json"
+            },
+            data: body,
+            validateStatus: () => true
+        });
+
+        this.log(`${method} ${url} - Status: ${response.status}`);
+
+        if (response.data) {
+            return response.data;
+        }
+
+        return {
+            code: response.status,
+            status: response.status,
+            msg: response.statusText || 'No response data'
+        };
+
+    } catch (error) {
+        this.error(`Request error: ${error.message}`);
+        
+        if (error.response) {
+            this.error(`Status: ${error.response.status}, Message: ${error.response.statusText}`);
+            return {
+                code: error.response.status,
+                status: error.response.status,
+                msg: error.response.data?.msg || error.response.statusText
+            };
+        } else if (error.request) {
+            this.error('No response received from server');
+            return {
+                code: 500,
+                status: 500,
+                msg: 'No response from server'
+            };
+        } else {
+            this.error(`Setup error: ${error.message}`);
+            return {
+                code: 500,
+                status: 500,
+                msg: error.message
+            };
         }
     }
+}
 
     // ========================================
     // SESSION MONITORING
@@ -161,8 +217,19 @@ class GameVaultController {
             const timeSinceLastActivity = Date.now() - this.lastSuccessfulOperation;
             
             if (timeSinceLastActivity > this.activityTimeout) {
+                if (this.consecutiveMonitorFailures >= this.maxMonitorFailures) {
+                    this.error(`Session monitor disabled after ${this.maxMonitorFailures} consecutive failures. Manual restart required.`);
+                    return;
+                }
+                
                 this.log('Session timeout detected, reinitializing...');
-                await this.reinitialize();
+                try {
+                    await this.reinitialize();
+                    this.consecutiveMonitorFailures = 0;
+                } catch (error) {
+                    this.consecutiveMonitorFailures++;
+                    this.error(`Reinitialize failed (${this.consecutiveMonitorFailures}/${this.maxMonitorFailures}): ${error.message}`);
+                }
             }
         }, 60000);
     }
@@ -176,96 +243,15 @@ class GameVaultController {
         this.cache.adminBalance = null;
         this.cache.adminBalanceTimestamp = null;
         
+        this.authRetryCount = 0;
+        
         try {
             await this.initialize();
+            this.consecutiveMonitorFailures = 0;
         } catch (error) {
             this.error(`Reinitialization failed: ${error.message}`);
+            throw error;
         }
-    }
-
-    // ========================================
-    // QUEUE SYSTEM IMPLEMENTATION
-    // ========================================
-
-    async queueOperation(operationName, operationFunction) {
-        return new Promise((resolve, reject) => {
-            this.requestQueue.push({
-                name: operationName,
-                function: operationFunction,
-                resolve,
-                reject,
-                timestamp: Date.now()
-            });
-            
-            this.log(`📥 Queued: "${operationName}" | Queue length: ${this.requestQueue.length}`);
-            
-            // Don't start processing if browser isn't ready or authorization is in progress
-            if (this.isInitializing || this.isAuthorizing) {
-                this.log('Browser is initializing or authorizing, queue will be processed after completion');
-                return;
-            }
-            
-            if (!this.isProcessingQueue && this.initialized && this.browserReady && this.authorized) {
-                this.processQueue();
-            } else if (!this.initialized || !this.browserReady) {
-                this.log('Browser not ready, initializing...');
-                this.initialize().catch(err => {
-                    this.error(`Failed to initialize for queued operation: ${err.message}`);
-                });
-            }
-        });
-    }
-
-    async processQueue() {
-        if (this.isProcessingQueue) {
-            this.log('Queue processor already running');
-            return;
-        }
-
-        // Don't process if not fully ready
-        if (!this.initialized || !this.browserReady || !this.authorized) {
-            this.log(`Not ready to process queue yet (initialized: ${this.initialized}, browserReady: ${this.browserReady}, authorized: ${this.authorized})`);
-            return;
-        }
-        
-        this.isProcessingQueue = true;
-        this.log('🚀 Queue processor started');
-        
-        while (this.requestQueue.length > 0) {
-            const task = this.requestQueue.shift();
-            const queueWaitTime = Date.now() - task.timestamp;
-            this.log(`▶️  Processing: "${task.name}" (waited ${queueWaitTime}ms) | Remaining: ${this.requestQueue.length}`);
-            
-            try {
-                await this.ensureBrowserReady();
-                
-                const startTime = Date.now();
-                const result = await task.function();
-                const executionTime = Date.now() - startTime;
-                
-                this.log(`✅ Completed: "${task.name}" in ${executionTime}ms`);
-                this.lastSuccessfulOperation = Date.now();
-                this.consecutiveErrors = 0;
-                task.resolve(result);
-                
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-            } catch (error) {
-                this.error(`❌ Failed: "${task.name}" - ${error.message}`);
-                this.consecutiveErrors++;
-                
-                if (this.consecutiveErrors >= this.maxConsecutiveErrors) {
-                    this.error(`Too many consecutive errors (${this.consecutiveErrors}), reinitializing...`);
-                    await this.reinitialize();
-                    this.consecutiveErrors = 0;
-                }
-                
-                task.reject(error);
-            }
-        }
-        
-        this.isProcessingQueue = false;
-        this.log('🏁 Queue processor stopped');
     }
 
     // ========================================
@@ -273,13 +259,11 @@ class GameVaultController {
     // ========================================
 
     async ensureBrowserReady() {
-        // Wait for any ongoing initialization
         if (this.isInitializing && this.initializationPromise) {
             this.log('Waiting for initialization to complete...');
             await this.initializationPromise;
         }
 
-        // Wait for any ongoing authorization
         if (this.isAuthorizing && this.authorizationPromise) {
             this.log('Waiting for authorization to complete...');
             await this.authorizationPromise;
@@ -480,103 +464,91 @@ class GameVaultController {
         });
 
         this.browserReady = true;
-
         await this.checkAuthorization();
-    }
+    }// PART 2 OF 3 - Lines 501-1000
+// Paste this AFTER Part 1
 
     async checkAuthorization() {
-        try {
-            // Prevent multiple simultaneous authorization checks
-            if (this.isAuthorizing) {
-                this.log('Authorization already in progress, waiting...');
-                if (this.authorizationPromise) {
-                    await this.authorizationPromise;
-                }
-                return;
-            }
+    try {
+        // ⭐ FIX: If authorize() is already running, just wait for it
+        if (this.isAuthorizing && this.authorizationPromise) {
+            this.log('Authorization already in progress, skipping check...');
+            await this.authorizationPromise;
+            return;
+        }
 
-            if (!this.page || this.page.isClosed()) {
-                this.log('Page is closed, recreating browser...');
-                await this.createBrowser();
-                return;
-            }
+        if (!this.page || this.page.isClosed()) {
+            this.log('Page is closed, cannot check authorization');
+            return;
+        }
 
-            this.log('Checking authorization status...');
-            
-            await this.page.goto('https://agent.gamevault999.com/userManagement', {
-                waitUntil: 'domcontentloaded',
-                timeout: 15000
-            });
+        this.log('Checking authorization status...');
+        
+        await this.page.goto('https://agent.gamevault999.com/userManagement', {
+            waitUntil: 'domcontentloaded',
+            timeout: 15000
+        });
 
-            const sessionPath = path.join(__dirname, 'sessiongv.json');
-            if (existsSync(sessionPath)) {
-                try {
-                    const session = readFileSync(sessionPath).toString();
-                    const session_parsed = JSON.parse(session);
+        const sessionPath = path.join(__dirname, 'sessiongv.json');
+        if (existsSync(sessionPath)) {
+            try {
+                const session = readFileSync(sessionPath).toString();
+                const session_parsed = JSON.parse(session);
 
-                    await this.page.evaluate((session_parsed) => {
-                        for (const key of Object.keys(session_parsed)) {
-                            localStorage.setItem(key, session_parsed[key]);
-                        }
-                    }, session_parsed);
+                await this.page.evaluate((session_parsed) => {
+                    for (const key of Object.keys(session_parsed)) {
+                        localStorage.setItem(key, session_parsed[key]);
+                    }
+                }, session_parsed);
 
-                    await this.page.goto('https://agent.gamevault999.com/userManagement', {
-                        waitUntil: 'domcontentloaded',
-                        timeout: 15000
-                    });
-                    
-                    this.log('Session storage loaded');
-                } catch (error) {
-                    this.log('Error loading session, continuing without it');
-                }
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
-            const isLoginPage = await this.page.evaluate(() => {
-                const errorPage = document.querySelector('.error-page');
-                if (errorPage) return true;
-                return location.pathname === '/login';
-            });
-
-            if (isLoginPage) {
-                this.authorized = false;
-                this.log('Not authorized - need to login');
-                await this.authorize();
-                return;
-            } else {
-                this.log('Already authorized');
-                this.authorized = true;
-                this.initialized = true;      // ← ADD THIS
-                this.browserReady = true;
+                await this.page.goto('https://agent.gamevault999.com/userManagement', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                });
                 
-                // Start processing queue if there are items
-                if (this.requestQueue.length > 0 && !this.isProcessingQueue) {
-                    this.log('Authorization complete, starting queue processor...');
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    this.processQueue();
-                }
-                
-                return true;
-            }
-        } catch (error) {
-            this.error(`Error checking authorization: ${error.message}`);
-            
-            if (error.message.includes('detached Frame') || 
-                error.message.includes('Target closed') ||
-                error.message.includes('Session closed')) {
-                this.log('Detected detached frame, recreating browser...');
-                this.browserReady = false;
-                this.initialized = false;
-                await this.createBrowser();
-                return;
-            }
-            
-            if (!this.isAuthorizing) {
-                setTimeout(() => this.checkAuthorization(), 5000);
+                this.log('Session storage loaded');
+            } catch (error) {
+                this.log('Error loading session, continuing without it');
             }
         }
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        const isLoginPage = await this.page.evaluate(() => {
+            const errorPage = document.querySelector('.error-page');
+            if (errorPage) return true;
+            return location.pathname === '/login';
+        });
+
+        if (isLoginPage) {
+            this.authorized = false;
+            this.log('Not authorized - need to login');
+            await this.authorize();
+            return;
+        } else {
+            this.log('✅ Already authorized (session valid)');
+            this.authorized = true;
+            this.initialized = true;
+            this.browserReady = true;
+            
+            return true;
+        }
+    } catch (error) {
+        this.error(`Error checking authorization: ${error.message}`);
+        
+        if (error.message.includes('detached Frame') || 
+            error.message.includes('Target closed') ||
+            error.message.includes('Session closed')) {
+            this.log('Detected detached frame, need browser restart');
+            this.browserReady = false;
+            this.initialized = false;
+            return;
+        }
+        
+        // Don't retry automatically - let it be handled elsewhere
+        this.log('Check authorization failed, will retry on next operation');
     }
+}
 
     async reload() {
         this.log('Reloading and clearing session files...');
@@ -595,197 +567,232 @@ class GameVaultController {
         }
         
         this.authorized = false;
+        this.authRetryCount = 0;
+        
         await this.authorize();
         return true;
     }
 
     async authorize() {
-        if (this.authorizationInProgress) {
-            this.log('Authorization already in progress, waiting...');
-            if (this.authorizationPromise) {
-                await this.authorizationPromise;
-                return;
+    if (this.authorizationInProgress && this.authorizationPromise) {
+        this.log('Authorization already in progress, waiting for it...');
+        await this.authorizationPromise;
+        return;
+    }
+
+    // ⭐ CHECK RETRY LIMIT BEFORE STARTING
+    this.resetAuthRetryIfNeeded();
+    
+    if (this.authRetryCount >= this.maxAuthRetries) {
+        this.error(`Max authorization attempts (${this.maxAuthRetries}) reached. Waiting 30 seconds before reset...`);
+        this.authRetryCount = 0;
+        await new Promise(resolve => setTimeout(resolve, 30000));
+    }
+
+    this.authorizationInProgress = true;
+    this.isAuthorizing = true;
+    this.authRetryCount++; // ⭐ Increment retry counter
+    this.lastAuthAttempt = Date.now();
+    
+    this.authorizationPromise = (async () => {
+        try {
+            this.log(`Starting authorization (attempt ${this.authRetryCount}/${this.maxAuthRetries})...`);
+            
+            // ⭐ FIX: Just check if page exists, don't call initialize
+            if (!this.page || this.page.isClosed()) {
+                this.log('Page is invalid, cannot authorize');
+                throw new Error('Browser not ready - please initialize first');
             }
+
+            // ⭐ Proceed directly to login page
+            await this.page.goto('https://agent.gamevault999.com/login', {
+                waitUntil: 'domcontentloaded',
+                timeout: 10000
+            });
+
+            if (!this.agentCredentials) {
+                const credentialsLoaded = await this.loadAgentCredentials();
+                if (!credentialsLoaded) {
+                    throw new Error('Cannot authorize without agent credentials');
+                }
+            }
+
+            this.log(`Using agent credentials: ${this.agentCredentials.username}`);
+
+            await this.page.evaluate(() => {
+                const inputs = document.querySelectorAll('input');
+                if (inputs.length < 4) {
+                    throw new Error('Login form not found - not enough input fields');
+                }
+                inputs[0].setAttribute('id', 'login');
+                inputs[0].value = '';
+                inputs[1].setAttribute('id', 'password');
+                inputs[1].value = '';
+                inputs[2].setAttribute('id', 'captcha');
+                inputs[3].click();
+            });
+
+            await new Promise(resolve => setTimeout(resolve, 300));
+
+            await this.page.type('#login', this.agentCredentials.username);
+            await this.page.type('#password', this.agentCredentials.password);
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            this.log('Waiting for captcha image...');
+            await this.page.waitForSelector('.imgCode', { timeout: 5000 });
+            
+            await this.page.waitForFunction(() => {
+                const img = document.querySelector('.imgCode');
+                return img && img.complete && img.naturalHeight !== 0;
+            }, { timeout: 5000 });
+
+            await new Promise(resolve => setTimeout(resolve, 200));
+
+            const base64Captcha = await this.page.evaluate(() => {
+                const captchaImg = document.querySelector('.imgCode');
+                
+                if (!captchaImg || !captchaImg.complete || captchaImg.naturalHeight === 0) {
+                    throw new Error('Captcha image not loaded');
+                }
+                
+                const canvas = document.createElement('canvas');
+                canvas.width = captchaImg.naturalWidth || 132;
+                canvas.height = captchaImg.naturalHeight || 40;
+                const context = canvas.getContext('2d');
+                context.drawImage(captchaImg, 0, 0);
+                return canvas.toDataURL("image/png").replace(/^data:image\/?[A-z]*;base64,/, "");
+            });
+
+            if (!base64Captcha || base64Captcha.length < 100) {
+                throw new Error('Failed to capture captcha image');
+            }
+
+            this.log('Solving captcha...');
+            const captchaValue = await Captcha(base64Captcha, 4);
+            
+            if (!captchaValue) {
+                throw new Error('Failed to solve captcha');
+            }
+            
+            this.log(`Captcha solved: ${captchaValue}`);
+
+            await this.page.type('#captcha', captchaValue);
+            
+            await this.page.evaluate(() => {
+                const buttons = document.querySelectorAll('button');
+                buttons[2].click();
+            });
+
             await new Promise(resolve => setTimeout(resolve, 3000));
-            return;
-        }
 
-        this.authorizationInProgress = true;
-        this.isAuthorizing = true;
-        
-        this.authorizationPromise = (async () => {
-            try {
-                this.log('Starting authorization...');
+            const currentUrl = this.page.url();
+            const currentPath = await this.page.evaluate(() => location.pathname);
+            this.log(`After login click - URL: ${currentUrl}, Path: ${currentPath}`);
+
+            const is_logged_in = await this.page.evaluate(() => {
+                return location.pathname === '/userManagement' || location.pathname === '/HomeDetail';
+            });
+
+            if (is_logged_in) {
+                this.authorized = true;
+                this.log('✅ Successfully authorized');
                 
-                if (!this.page || this.page.isClosed()) {
-                    this.log('Page is invalid, recreating browser...');
-                    await this.createBrowser();
-                    return;
-                }
-
-                await this.page.goto('https://agent.gamevault999.com/login', {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 10000
-                });
-
-                if (!this.agentCredentials) {
-                    const credentialsLoaded = await this.loadAgentCredentials();
-                    if (!credentialsLoaded) {
-                        throw new Error('Cannot authorize without agent credentials');
-                    }
-                }
-
-                this.log(`Using agent credentials: ${this.agentCredentials.username}`);
-
-                await this.page.evaluate(() => {
-                    const inputs = document.querySelectorAll('input');
-                    if (inputs.length < 4) {
-                        throw new Error('Login form not found - not enough input fields');
-                    }
-                    inputs[0].setAttribute('id', 'login');
-                    inputs[0].value = '';
-                    inputs[1].setAttribute('id', 'password');
-                    inputs[1].value = '';
-                    inputs[2].setAttribute('id', 'captcha');
-                    inputs[3].click();
-                });
-
-                await new Promise(resolve => setTimeout(resolve, 300));
-
-                await this.page.type('#login', this.agentCredentials.username);
-                await this.page.type('#password', this.agentCredentials.password);
-                await new Promise(resolve => setTimeout(resolve, 500));
-
-                this.log('Waiting for captcha image...');
-                await this.page.waitForSelector('.imgCode', { timeout: 5000 });
+                // ⭐ RESET RETRY COUNT ON SUCCESS
+                this.authRetryCount = 0;
                 
-                await this.page.waitForFunction(() => {
-                    const img = document.querySelector('.imgCode');
-                    return img && img.complete && img.naturalHeight !== 0;
-                }, { timeout: 5000 });
-
-                await new Promise(resolve => setTimeout(resolve, 200));
-
-                const base64Captcha = await this.page.evaluate(() => {
-                    const captchaImg = document.querySelector('.imgCode');
-                    
-                    if (!captchaImg || !captchaImg.complete || captchaImg.naturalHeight === 0) {
-                        throw new Error('Captcha image not loaded');
-                    }
-                    
-                    const canvas = document.createElement('canvas');
-                    canvas.width = captchaImg.naturalWidth || 132;
-                    canvas.height = captchaImg.naturalHeight || 40;
-                    const context = canvas.getContext('2d');
-                    context.drawImage(captchaImg, 0, 0);
-                    return canvas.toDataURL("image/png").replace(/^data:image\/?[A-z]*;base64,/, "");
-                });
-
-                if (!base64Captcha || base64Captcha.length < 100) {
-                    throw new Error('Failed to capture captcha image');
-                }
-
-                this.log('Solving captcha...');
-                const captchaValue = await Captcha(base64Captcha, 4);
-                
-                if (!captchaValue) {
-                    throw new Error('Failed to solve captcha');
+                if (currentPath === '/HomeDetail') {
+                    this.log('Redirected to HomeDetail, navigating to userManagement...');
+                    await this.page.goto('https://agent.gamevault999.com/userManagement', {
+                        waitUntil: 'domcontentloaded',
+                        timeout: 15000
+                    });
                 }
                 
-                this.log(`Captcha solved: ${captchaValue}`);
-
-                await this.page.type('#captcha', captchaValue);
+                await new Promise(resolve => setTimeout(resolve, 2000));
                 
-                await this.page.evaluate(() => {
-                    const buttons = document.querySelectorAll('button');
-                    buttons[2].click();
-                });
-
-                await new Promise(resolve => setTimeout(resolve, 3000));
-
-                const currentUrl = this.page.url();
-                const currentPath = await this.page.evaluate(() => location.pathname);
-                this.log(`After login click - URL: ${currentUrl}, Path: ${currentPath}`);
-
-                const is_logged_in = await this.page.evaluate(() => {
-                    return location.pathname === '/userManagement' || location.pathname === '/HomeDetail';
-                });
-
-                if (is_logged_in) {
-                    this.authorized = true;
-                    this.log('Successfully authorized');
+                await this.saveCookies();
+                await this.saveSession();
+                
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                this.log('Session and cookies saved, authorization complete');
+            } else {
+                const error_message = await this.page.evaluate(() => {
+                    const message = document.querySelector('p.el-message__content');
+                    if (message) return message.innerText;
                     
-                    if (currentPath === '/HomeDetail') {
-                        this.log('Redirected to HomeDetail, navigating to userManagement...');
-                        await this.page.goto('https://agent.gamevault999.com/userManagement', {
-                            waitUntil: 'domcontentloaded',
-                            timeout: 15000
-                        });
+                    if (location.pathname === '/login') {
+                        return 'Still on login page - possibly wrong captcha or credentials';
                     }
                     
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                    
-                    await this.saveCookies();
-                    await this.saveSession();
-                    
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    
-                    this.log('Session and cookies saved, authorization complete');
-                    
-                    // Start processing queue if there are items
-                    if (this.requestQueue.length > 0 && !this.isProcessingQueue) {
-                        this.log('Starting queue processor...');
-                        await new Promise(resolve => setTimeout(resolve, 1000));
-                        this.processQueue();
+                    return 'Login failed - unknown reason';
+                });
+
+                this.log(`❌ Failed login: ${error_message}`);
+                
+                // ⭐ CHECK RETRY LIMIT
+                if (error_message.includes('captcha') || error_message.includes('Still on login')) {
+                    if (this.authRetryCount < this.maxAuthRetries) {
+                        this.log(`Retrying login in 3 seconds (attempt ${this.authRetryCount + 1}/${this.maxAuthRetries})...`);
+                        
+                        // ⭐ Clear flags before retry
+                        this.authorizationInProgress = false;
+                        this.isAuthorizing = false;
+                        this.authorizationPromise = null;
+                        
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        return await this.authorize();
+                    } else {
+                        throw new Error(`Max retry attempts reached: ${error_message}`);
                     }
                 } else {
-                    const error_message = await this.page.evaluate(() => {
-                        const message = document.querySelector('p.el-message__content');
-                        if (message) return message.innerText;
-                        
-                        if (location.pathname === '/login') {
-                            return 'Still on login page - possibly wrong captcha or credentials';
-                        }
-                        
-                        return 'Login failed - unknown reason';
-                    });
-
-                    this.log(`Failed login: ${error_message}`);
-                    
-                    if (error_message.includes('captcha') || error_message.includes('Still on login')) {
-                        this.log('Retrying login in 3 seconds...');
-                        setTimeout(() => this.authorize(), 3000);
-                    } else {
-                        throw new Error(`Login failed: ${error_message}`);
-                    }
+                    throw new Error(`Login failed: ${error_message}`);
                 }
+            }
+            
+        } catch (error) {
+            this.error(`Error during authorization: ${error.message}`);
+            this.authorized = false;
+            
+            if (error.message.includes('detached Frame') || 
+                error.message.includes('Target closed') ||
+                error.message.includes('Session closed') ||
+                error.message.includes('Browser not ready')) {
+                this.log('Browser session lost or not ready');
+                this.browserReady = false;
+                this.initialized = false;
                 
-            } catch (error) {
-                this.error(`Error during authorization: ${error.message}`);
-                this.authorized = false;
-                
-                if (error.message.includes('detached Frame') || 
-                    error.message.includes('Target closed') ||
-                    error.message.includes('Session closed')) {
-                    this.log('Browser session lost, recreating...');
-                    this.browserReady = false;
-                    this.initialized = false;
-                    setTimeout(async () => {
-                        await this.createBrowser();
-                    }, 5000);
-                    return;
-                }
-                
-                setTimeout(() => this.authorize(), 3000);
-            } finally {
+                // ⭐ Clear flags and let initialize handle it
                 this.authorizationInProgress = false;
                 this.isAuthorizing = false;
                 this.authorizationPromise = null;
+                
+                throw error; // Re-throw so makeRequest can handle it
             }
-        })();
+            
+            // ⭐ CHECK RETRY LIMIT BEFORE RETRYING
+            if (this.authRetryCount < this.maxAuthRetries) {
+                this.log(`Retrying authorization in 3 seconds (attempt ${this.authRetryCount + 1}/${this.maxAuthRetries})...`);
+                this.authorizationInProgress = false;
+                this.isAuthorizing = false;
+                this.authorizationPromise = null;
+                
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                return await this.authorize();
+            } else {
+                this.error(`Max authorization attempts (${this.maxAuthRetries}) reached. Will retry after cooldown.`);
+                this.authRetryCount = 0; // Reset for next attempt
+                throw error;
+            }
+        } finally {
+            this.authorizationInProgress = false;
+            this.isAuthorizing = false;
+            this.authorizationPromise = null;
+        }
+    })();
 
-        await this.authorizationPromise;
-    }
+    await this.authorizationPromise;
+}
 
     async saveCookies() {
         try {
@@ -849,52 +856,6 @@ class GameVaultController {
         }
     }
 
-    async checkQueue() {
-        try {
-            const task = await Tasks.get('gamevault');
-
-            if (!task) {
-                return setTimeout(this.checkQueue.bind(this), 1000);
-            }
-
-            console.log('Processing task:', task);
-
-            let task_result = null;
-
-            switch (task.type) {
-                case 'get_balance':
-                    task_result = await this.getBalance(task);
-                    break;
-                case 'get_admin_balance':
-                    task_result = await this.getBalanceAdmin(task);
-                    break;
-                case 'recharge':
-                    task_result = await this.recharge(task);
-                    break;
-                case 'redeem':
-                    task_result = await this.redeem(task);
-                    break;
-                case 'create':
-                    task_result = await this.createAccount(task);
-                    break;
-                case 'reset':
-                    task_result = await this.resetPassword(task);
-                    break;
-                default:
-                    this.error(`Unknown task type: ${task.type}`);
-            }
-
-            if (task_result === -1) {
-                return;
-            }
-
-            return setTimeout(this.checkQueue.bind(this), 5000);
-        } catch (error) {
-            this.error(`Error in checkQueue: ${error.message}`);
-            setTimeout(this.checkQueue.bind(this), 5000);
-        }
-    }
-
     // ========================================
     // HELPER METHODS FOR API CALLS
     // ========================================
@@ -924,7 +885,8 @@ class GameVaultController {
                     page: 1,
                     search: login,
                     timezone: "cst",
-                    type: 1}
+                    type: 1
+                }
             });
 
             if (response.code !== 200) {
@@ -1027,333 +989,8 @@ class GameVaultController {
         }
     }
 
-    // ========================================
-    // API METHODS WITH QUEUE
-    // ========================================
-
-    async createGameAccount(userId, game) {
-        return await this.queueOperation('createGameAccount', async () => {
-            try {
-                const generateRandomString = () => {
-                    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-                    let result = '';
-                    for (let i = 0; i < 4; i++) {
-                        result += chars.charAt(Math.floor(Math.random() * chars.length));
-                    }
-                    return result;
-                };
-                
-                const login = `bc${generateRandomString()}_${generateRandomString()}`;
-                const password = `bc${generateRandomString()}_${generateRandomString()}`;
-
-                console.log(`Generated credentials for API - Login: ${login}, Password: ${password}`);
-
-                const gameAccount = new GameAccount({
-                    userId,
-                    gameId: game._id,
-                    gameLogin: login,
-                    gamePassword: password,
-                    status: 'pending',
-                    metadata: {
-                        createdVia: 'api'
-                    }
-                });
-
-                await gameAccount.save();
-
-                const task = {
-                    id: gameAccount._id.toString(),
-                    type: 'create',
-                    login,
-                    password,
-                    userId
-                };
-
-                const result = await this.createAccount(task);
-
-                if (result && result.success) {
-                    gameAccount.status = 'active';
-                    gameAccount.gameLogin = result.login;
-                    gameAccount.gamePassword = result.password;
-                    
-                    if (!gameAccount.metadata) {
-                        gameAccount.metadata = {};
-                    }
-                    gameAccount.metadata.login = result.login;
-                    gameAccount.metadata.password = result.password;
-                    
-                    await gameAccount.save();
-
-                    return {
-                        success: true,
-                        data: {
-                            _id: gameAccount._id,
-                            gameLogin: result.login,
-                            gamePassword: result.password,
-                            gameType: gameAccount.gameType,
-                            status: gameAccount.status
-                        },
-                        message: 'Game account created successfully'
-                    };
-                } else {
-                    gameAccount.status = 'failed';
-                    if (result && result.message) {
-                        if (!gameAccount.metadata) {
-                            gameAccount.metadata = {};
-                        }
-                        gameAccount.metadata.notes = result.message;
-                    }
-                    await gameAccount.save();
-                    throw new Error(result ? result.message : 'Failed to create game account');
-                }
-
-            } catch (error) {
-                this.error(`Error creating game account: ${error.message}`);
-                throw error;
-            }
-        });
-    }
-
-    async getGameBalance(userId, gameLogin) {
-        return await this.queueOperation(`getBalance:${gameLogin}`, async () => {
-            console.log('=== getGameBalance (Queued) ===');
-            console.log('userId:', userId);
-            console.log('gameLogin:', gameLogin);
-            
-            try {
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin,
-                    gameType: this.gameType
-                }).sort({ createdAt: -1 });
-
-                if (!gameAccount) {
-                    throw new Error('Game account not found');
-                }
-
-                const userInfo = await this.getLoginBalance(gameLogin);
-
-                if (!userInfo || userInfo === -1) {
-                    return {
-                        success: false,
-                        data: null,
-                        message: 'Failed to retrieve balance from game server'
-                    };
-                }
-
-                const balance = userInfo.balance;
-
-                await gameAccount.updateBalance(balance);
-
-                return {
-                    success: true,
-                    data: {
-                        gameLogin,
-                        balance,
-                        lastCheck: new Date(),
-                        accountId: gameAccount._id
-                    }
-                };
-
-            } catch (error) {
-                this.error(`Error getting balance: ${error.message}`);
-                return {
-                    success: false,
-                    data: null,
-                    message: error.message
-                };
-            }
-        });
-    }
-
-    async rechargeAccount(userId, gameLogin, totalAmount, baseAmount, remark = 'API Recharge') {
-        return await this.queueOperation(`recharge:${gameLogin}:${totalAmount}`, async () => {
-            try {
-                console.log("Recharge (Queued) - Finding game account...");
-                console.log(`Base Amount: ${baseAmount}, Total Amount (with bonus): ${totalAmount}`);
-                
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin,
-                    gameType: this.gameType
-                });
-
-                if (!gameAccount) {
-                    throw new Error('Game account not found');
-                }
-
-                // const transaction = {
-                //     type: 'recharge',
-                //     amount: baseAmount,
-                //     remark,
-                //     status: 'pending',
-                //     metadata: {
-                //         baseAmount: baseAmount,
-                //         bonusAmount: totalAmount - baseAmount,
-                //         totalAmount: totalAmount,
-                //         note: 'Includes 10% bonus'
-                //     }
-                // };
-
-                // await gameAccount.addTransaction(transaction);
-                // const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
-                // console.log(`✅ Transaction created: ${transactionId} with base amount: ${baseAmount}`);
-
-                 const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-            // ✅ CREATE TASK with the unique ID
-            const task = {
-                id: transactionId, // Use the generated unique ID
-                login: gameLogin,
-                amount: totalAmount, // Recharge the TOTAL amount in game
-                remark,
-                is_manual: false
-            };
-
-                console.log(`Calling recharge with total amount: ${totalAmount}`);
-                const result = await this.recharge(task);
-
-                if (result && result !== -1) {
-                    const updatedGameAccount = await GameAccount.findById(gameAccount._id);
-                    
-                    console.log(`✅ Recharge successful`);
-                    console.log(`   - User paid: ${baseAmount}`);
-                    console.log(`   - Bonus: ${totalAmount - baseAmount}`);
-                    console.log(`   - Total recharged in game: ${totalAmount}`);
-                    console.log(`   - New balance: ${updatedGameAccount.balance}`);
-                    
-                    return {
-                        success: true,
-                        data: {
-                            transactionId,
-                            newBalance: updatedGameAccount.balance,
-                            baseAmount: baseAmount,
-                            bonusAmount: totalAmount - baseAmount,
-                            totalAmount: totalAmount
-                        },
-                        message: 'Recharge completed successfully'
-                    };
-                } else {
-                    throw new Error('Recharge failed');
-                }
-
-            } catch (error) {
-                this.error(`Error processing recharge: ${error.message}`);
-                throw error;
-            }
-        });
-    }
-
-    async redeemFromAccount(userId, gameLogin, totalAmount, cashoutAmount, remark = 'API Redeem') {
-        return await this.queueOperation(`redeem:${gameLogin}:${cashoutAmount}`, async () => {
-            try {
-                console.log('🔵 redeemFromAccount START:', { userId, gameLogin, totalAmount, cashoutAmount, remark });
-                
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin,
-                    gameType: this.gameType
-                });
-
-                if (!gameAccount) {
-                    console.log('❌ Game account not found in database');
-                    throw new Error('Game account not found');
-                }
-                console.log('✅ Game account found:', gameAccount._id);
-
-                if (gameAccount.balance < totalAmount) {
-                    console.log(`❌ Insufficient balance: Has ${gameAccount.balance}, needs ${totalAmount}`);
-                    throw new Error('Insufficient balance');
-                }
-                console.log('✅ Balance sufficient');
-
-                const task = {
-                    id: null,
-                    login: gameLogin,
-                    amount: totalAmount,
-                    remark,
-                    is_manual: true
-                };
-
-                console.log('Calling redeem with task:', task);
-                const result = await this.redeem(task);
-                console.log('Redeem result:', result);
-
-                if (result && result !== -1) {
-                    console.log('✅ Redeem successful, fetching updated balance...');
-                    const updatedGameAccount = await GameAccount.findById(gameAccount._id);
-                    
-                    return {
-                        success: true,
-                        data: {
-                            newBalance: updatedGameAccount.balance
-                        },
-                        message: 'Redeem completed successfully'
-                    };
-                } else {
-                    console.log('❌ Redeem returned false or -1');
-                    throw new Error('Redeem failed');
-                }
-
-            } catch (error) {
-                console.log('❌ redeemFromAccount ERROR:', error.message);
-                this.error(`Error processing redeem: ${error.message}`);
-                throw error;
-            }
-        });
-    }
-
-    async resetAccountPassword(userId, gameLogin, newPassword) {
-        return await this.queueOperation(`resetPassword:${gameLogin}`, async () => {
-            try {
-                const gameAccount = await GameAccount.findOne({
-                    userId,
-                    gameLogin,
-                    gameType: this.gameType
-                });
-
-                if (!gameAccount) {
-                    return {
-                        success: false,
-                        message: 'Game account not found'
-                    };
-                }
-
-                this.log('Password reset not supported for GameVault');
-                
-                return {
-                    success: false,
-                    message: 'Password reset not supported for GameVault platform'
-                };
-
-            } catch (error) {
-                this.error(`Error resetting password: ${error.message}`);
-                return {
-                    success: false,
-                    message: error.message || 'Error resetting password'
-                };
-            }
-        });
-    }
-
-    async getAdminBalance() {
-        return await this.queueOperation('getAdminBalance', async () => {
-            if (this.cache.adminBalance !== null && 
-                this.cache.adminBalanceTimestamp && 
-                Date.now() - this.cache.adminBalanceTimestamp < this.cache.cacheDuration) {
-                this.log(`Returning cached admin balance: ${this.cache.adminBalance}`);
-                return this.cache.adminBalance;
-            }
-            
-            const balance = await this._getAdminBalanceCore();
-            
-            if (balance !== false && balance !== -1 && balance !== null) {
-                this.cache.adminBalance = balance;
-                this.cache.adminBalanceTimestamp = Date.now();
-            }
-            
-            return balance;
-        });
+    timeout(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms, true));
     }
 
     async _getAdminBalanceCore() {
@@ -1393,45 +1030,332 @@ class GameVaultController {
             this.error(`Error getting admin balance: ${error.message}`);
             return false;
         }
+    }// PART 3 OF 3 - Lines 1001-End (FINAL)
+// Paste this AFTER Part 2
+
+    // ========================================
+    // API METHODS (WITHOUT QUEUE)
+    // ========================================
+
+    async createGameAccount(userId, game) {
+        try {
+            const generateRandomString = () => {
+                const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+                let result = '';
+                for (let i = 0; i < 4; i++) {
+                    result += chars.charAt(Math.floor(Math.random() * chars.length));
+                }
+                return result;
+            };
+            
+            const login = `bc${generateRandomString()}_${generateRandomString()}`;
+            const password = `bc${generateRandomString()}_${generateRandomString()}`;
+
+            console.log(`Generated credentials for API - Login: ${login}, Password: ${password}`);
+
+            const gameAccount = new GameAccount({
+                userId,
+                gameId: game._id,
+                gameLogin: login,
+                gamePassword: password,
+                status: 'pending',
+                metadata: {
+                    createdVia: 'api'
+                }
+            });
+
+            await gameAccount.save();
+
+            const task = {
+                id: gameAccount._id.toString(),
+                type: 'create',
+                login,
+                password,
+                userId
+            };
+
+            const result = await this.createAccount(task);
+
+            if (result && result.success) {
+                gameAccount.status = 'active';
+                gameAccount.gameLogin = result.login;
+                gameAccount.gamePassword = result.password;
+                
+                if (!gameAccount.metadata) {
+                    gameAccount.metadata = {};
+                }
+                gameAccount.metadata.login = result.login;
+                gameAccount.metadata.password = result.password;
+                
+                await gameAccount.save();
+
+                return {
+                    success: true,
+                    data: {
+                        _id: gameAccount._id,
+                        gameLogin: result.login,
+                        gamePassword: result.password,
+                        gameType: gameAccount.gameType,
+                        status: gameAccount.status
+                    },
+                    message: 'Game account created successfully'
+                };
+            } else {
+                gameAccount.status = 'failed';
+                if (result && result.message) {
+                    if (!gameAccount.metadata) {
+                        gameAccount.metadata = {};
+                    }
+                    gameAccount.metadata.notes = result.message;
+                }
+                await gameAccount.save();
+                throw new Error(result ? result.message : 'Failed to create game account');
+            }
+
+        } catch (error) {
+            this.error(`Error creating game account: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async getGameBalance(userId, gameLogin) {
+        console.log('=== getGameBalance ===');
+        console.log('userId:', userId);
+        console.log('gameLogin:', gameLogin);
+        
+        try {
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin,
+                gameType: this.gameType
+            }).sort({ createdAt: -1 });
+
+            if (!gameAccount) {
+                throw new Error('Game account not found');
+            }
+
+            const userInfo = await this.getLoginBalance(gameLogin);
+
+            if (!userInfo || userInfo === -1) {
+                return {
+                    success: false,
+                    data: null,
+                    message: 'Failed to retrieve balance from game server'
+                };
+            }
+
+            const balance = userInfo.balance;
+
+            await gameAccount.updateBalance(balance);
+
+            return {
+                success: true,
+                data: {
+                    gameLogin,
+                    balance,
+                    lastCheck: new Date(),
+                    accountId: gameAccount._id
+                }
+            };
+
+        } catch (error) {
+            this.error(`Error getting balance: ${error.message}`);
+            return {
+                success: false,
+                data: null,
+                message: error.message
+            };
+        }
+    }
+
+    async rechargeAccount(userId, gameLogin, totalAmount, baseAmount, remark = 'API Recharge') {
+        try {
+            console.log("Recharge - Finding game account...");
+            console.log(`Base Amount: ${baseAmount}, Total Amount (with bonus): ${totalAmount}`);
+            
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin,
+                gameType: this.gameType
+            });
+
+            if (!gameAccount) {
+                throw new Error('Game account not found');
+            }
+
+            const transactionId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+            const task = {
+                id: transactionId,
+                login: gameLogin,
+                amount: totalAmount,
+                remark,
+                is_manual: false
+            };
+
+            console.log(`Calling recharge with total amount: ${totalAmount}`);
+            const result = await this.recharge(task);
+
+            if (result && result !== -1) {
+                const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+                
+                console.log(`✅ Recharge successful`);
+                console.log(`   - User paid: ${baseAmount}`);
+                console.log(`   - Bonus: ${totalAmount - baseAmount}`);
+                console.log(`   - Total recharged in game: ${totalAmount}`);
+                console.log(`   - New balance: ${updatedGameAccount.balance}`);
+                
+                return {
+                    success: true,
+                    data: {
+                        transactionId,
+                        newBalance: updatedGameAccount.balance,
+                        baseAmount: baseAmount,
+                        bonusAmount: totalAmount - baseAmount,
+                        totalAmount: totalAmount
+                    },
+                    message: 'Recharge completed successfully'
+                };
+            } else {
+                throw new Error('Recharge failed');
+            }
+
+        } catch (error) {
+            this.error(`Error processing recharge: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async redeemFromAccount(userId, gameLogin, totalAmount, cashoutAmount, remark = 'API Redeem') {
+        try {
+            console.log('🔵 redeemFromAccount START:', { userId, gameLogin, totalAmount, cashoutAmount, remark });
+            
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin,
+                gameType: this.gameType
+            });
+
+            if (!gameAccount) {
+                console.log('❌ Game account not found in database');
+                throw new Error('Game account not found');
+            }
+            console.log('✅ Game account found:', gameAccount._id);
+
+            if (gameAccount.balance < totalAmount) {
+                console.log(`❌ Insufficient balance: Has ${gameAccount.balance}, needs ${totalAmount}`);
+                throw new Error('Insufficient balance');
+            }
+            console.log('✅ Balance sufficient');
+
+            const task = {
+                id: null,
+                login: gameLogin,
+                amount: totalAmount,
+                remark,
+                is_manual: true
+            };
+
+            console.log('Calling redeem with task:', task);
+            const result = await this.redeem(task);
+            console.log('Redeem result:', result);
+
+            if (result && result !== -1) {
+                console.log('✅ Redeem successful, fetching updated balance...');
+                const updatedGameAccount = await GameAccount.findById(gameAccount._id);
+                
+                return {
+                    success: true,
+                    data: {
+                        newBalance: updatedGameAccount.balance
+                    },
+                    message: 'Redeem completed successfully'
+                };
+            } else {
+                console.log('❌ Redeem returned false or -1');
+                throw new Error('Redeem failed');
+            }
+
+        } catch (error) {
+            console.log('❌ redeemFromAccount ERROR:', error.message);
+            this.error(`Error processing redeem: ${error.message}`);
+            throw error;
+        }
+    }
+
+    async resetAccountPassword(userId, gameLogin, newPassword) {
+        try {
+            const gameAccount = await GameAccount.findOne({
+                userId,
+                gameLogin,
+                gameType: this.gameType
+            });
+
+            if (!gameAccount) {
+                return {
+                    success: false,
+                    message: 'Game account not found'
+                };
+            }
+
+            this.log('Password reset not supported for GameVault');
+            
+            return {
+                success: false,
+                message: 'Password reset not supported for GameVault platform'
+            };
+
+        } catch (error) {
+            this.error(`Error resetting password: ${error.message}`);
+            return {
+                success: false,
+                message: error.message || 'Error resetting password'
+            };
+        }
+    }
+
+    async getAdminBalance() {
+        if (this.cache.adminBalance !== null && 
+            this.cache.adminBalanceTimestamp && 
+            Date.now() - this.cache.adminBalanceTimestamp < this.cache.cacheDuration) {
+            this.log(`Returning cached admin balance: ${this.cache.adminBalance}`);
+            return this.cache.adminBalance;
+        }
+        
+        const balance = await this._getAdminBalanceCore();
+        
+        if (balance !== false && balance !== -1 && balance !== null) {
+            this.cache.adminBalance = balance;
+            this.cache.adminBalanceTimestamp = Date.now();
+        }
+        
+        return balance;
     }
 
     // ========================================
     // CORE OPERATION METHODS
     // ========================================
 
-    async getBalance({ id, login }) {
-        console.log('🔴 GET BALANCE START:', { id, login });
+    async getBalance({ id }) {
+        console.log('🔴 GET BALANCE ADMIN START:', { id });
         
         try {
-            await this.ensureBrowserReady();
-            
-            const userInfo = await this.getLoginBalance(login);
+            const balance = await this._getAdminBalanceCore();
 
-            if (!userInfo || userInfo === -1) {
-                this.error(`Failed to get balance for ${login}`);
+            if (balance === false || balance === -1) {
+                this.error('Failed to get admin balance');
                 await Tasks.error(id, 'failed to get balance');
                 return false;
             }
 
-            const balance = userInfo.balance;
-            this.log(`Current balance for ${login}: ${balance}`);
-
-            try {
-                const gameAccount = await GameAccount.findOne({ gameLogin: login });
-                if (gameAccount) {
-                    await gameAccount.updateBalance(balance);
-                }
-            } catch (dbError) {
-                this.error(`Error updating balance in DB: ${dbError.message}`);
-            }
-
+            this.log(`Current admin balance: ${balance}`);
             await Tasks.approve(id, balance);
             
-            console.log('✅ GET BALANCE COMPLETE');
+            console.log('✅ GET BALANCE ADMIN COMPLETE');
             return balance;
             
         } catch (error) {
-            console.error('❌ GET BALANCE ERROR:', error.message);
+            console.error('❌ GET BALANCE ADMIN ERROR:', error.message);
             this.error(`Error during get balance: ${error.message}`);
             return false;
         }
@@ -1441,8 +1365,6 @@ class GameVaultController {
         console.log('🔴 CREATE ACCOUNT START:', { id, login, password: '***' });
         
         try {
-            await this.ensureBrowserReady();
-            
             const response = await this.makeRequest({
                 url: "https://agent.gamevault999.com/api/user/addUser",
                 method: "POST",
@@ -1457,13 +1379,16 @@ class GameVaultController {
                 }
             });
 
-            if (response.code !== 200) {
-                if ([400, 401].includes(response.status)) {
+            const responseCode = response.code || response.status;
+
+            if (responseCode !== 200) {
+                if ([400, 401].includes(responseCode)) {
+                    this.error('Authentication error detected, reloading session...');
                     await this.reload();
                     return -1;
                 }
 
-                const errorMsg = `${response.status}, ${response.msg}`;
+                const errorMsg = response.msg || `Error code: ${responseCode}`;
                 this.error(errorMsg);
 
                 try {
@@ -1502,9 +1427,9 @@ class GameVaultController {
                     await gameAccount.save();
                     console.log('✅ Database updated');
                 }
-            } catch (error) {
-                console.log('DB update error:', error.message);
-                this.error(`Error updating account status in DB: ${error.message}`);
+            } catch (dbError) {
+                console.log('DB update error:', dbError.message);
+                this.error(`Error updating account status in DB: ${dbError.message}`);
             }
 
             await Tasks.approve(id);
@@ -1542,8 +1467,6 @@ class GameVaultController {
         console.log('🔴 RECHARGE START:', { id, login, amount, remark, is_manual });
         
         try {
-            await this.ensureBrowserReady();
-            
             const hasLogin = await this.isLoginExist(login);
             
             if (!hasLogin) {
@@ -1552,7 +1475,7 @@ class GameVaultController {
                 return false;
             }
 
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await this.timeout(500);
         
             const userInfo = await this.getLoginBalance(login);
 
@@ -1573,7 +1496,7 @@ class GameVaultController {
                 return false;
             }
 
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await this.timeout(500);
 
             const result = await this.redeemRecharge({
                 amount,
@@ -1583,16 +1506,18 @@ class GameVaultController {
                 type: 1
             });
 
+            console.log('Recharge result:', result);
+
             if (!result || result === -1 || result.code !== 200) {
+                await Tasks.error(id, 'wrong response status');
+
                 if (result && [400, 401].includes(result.status)) {
-                    await Tasks.error(id);
                     await this.reload();
                     return -1;
                 }
 
                 const errorMsg = result ? `${result.status}, ${result.msg}` : 'Recharge failed';
                 this.error(errorMsg);
-                await Tasks.error(id, errorMsg);
                 return false;
             }
 
@@ -1630,8 +1555,6 @@ class GameVaultController {
         console.log('🔴 REDEEM START:', { id, login, amount, remark, is_manual });
         
         try {
-            await this.ensureBrowserReady();
-            
             const hasLogin = await this.isLoginExist(login);
         
             if (!hasLogin) {
@@ -1640,7 +1563,7 @@ class GameVaultController {
                 return false;
             }
 
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await this.timeout(500);
         
             const userInfo = await this.getLoginBalance(login);
 
@@ -1668,7 +1591,7 @@ class GameVaultController {
                 }
             }
 
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await this.timeout(500);
 
             const result = await this.redeemRecharge({
                 amount,
@@ -1726,13 +1649,12 @@ class GameVaultController {
         this.log('Password reset not supported for GameVault');
         await Tasks.error(id, 'Password reset not supported');
         
+        console.log('✅ RESET PASSWORD COMPLETE (Not supported)');
         return false;
     }
 
     async getBalanceAdmin(task) {
         try {
-            await this.ensureBrowserReady();
-            
             const balance = await this._getAdminBalanceCore();
 
             if (balance !== null && !isNaN(balance) && balance !== false && balance !== -1) {
@@ -1758,7 +1680,54 @@ class GameVaultController {
         await Tasks.error(task.id, 'Download codes not supported');
         return false;
     }
+
+    async checkQueue() {
+        try {
+            const task = await Tasks.get('gamevault');
+
+            if (!task) {
+                return setTimeout(this.checkQueue.bind(this), 5000);
+            }
+
+            console.log('Processing task:', task);
+
+            let task_result = null;
+
+            switch (task.type) {
+                case 'get_balance':
+                    task_result = await this.getBalance(task);
+                    break;
+                case 'get_admin_balance':
+                    task_result = await this.getBalanceAdmin(task);
+                    break;
+                case 'recharge':
+                    task_result = await this.recharge(task);
+                    break;
+                case 'redeem':
+                    task_result = await this.redeem(task);
+                    break;
+                case 'create':
+                    task_result = await this.createAccount(task);
+                    break;
+                case 'reset':
+                    task_result = await this.resetPassword(task);
+                    break;
+                default:
+                    this.error(`Unknown task type: ${task.type}`);
+            }
+
+            if (task_result === -1) {
+                return;
+            }
+
+            return setTimeout(this.checkQueue.bind(this), 5000);
+        } catch (error) {
+            this.error(`Error in checkQueue: ${error.message}`);
+            setTimeout(this.checkQueue.bind(this), 5000);
+        }
+    }
 }
 
+// Export singleton instance
 const gameVaultController = new GameVaultController();
 module.exports = gameVaultController;
