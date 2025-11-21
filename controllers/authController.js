@@ -62,7 +62,7 @@ const register = async (req, res) => {
       const newUserWallet = await Wallet.findOrCreateWallet(newUser._id);
       newUserWallet.addTransaction({
         type: 'bonus',
-        amount: 5,
+        amount: 3,
         description: 'Welcome signup bonus',
         status: 'completed',
         isBonus: true,
@@ -72,7 +72,7 @@ const register = async (req, res) => {
         }
       });
       await newUserWallet.save();
-      console.log('✅ $5 signup bonus awarded to new user');
+      console.log('✅ $3 signup bonus awarded to new user');
     } catch (signupBonusError) {
       console.error('Error awarding signup bonus:', signupBonusError);
     }
