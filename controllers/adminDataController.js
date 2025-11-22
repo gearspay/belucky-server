@@ -1242,6 +1242,157 @@ const getUserDetails = async (req, res) => {
     }
 };
 
+const manualCompleteDeposit = async (req, res) => {
+    console.log('\n🔧 ═══════════════════════════════════════════════════');
+    console.log('🔧 MANUAL DEPOSIT COMPLETION START');
+    console.log('🔧 ═══════════════════════════════════════════════════');
+    
+    try {
+        const { walletId, transactionId, notes } = req.body;
+
+        console.log('📋 Request Details:');
+        console.log('   Wallet ID:', walletId);
+        console.log('   Transaction ID:', transactionId);
+        console.log('   Admin Notes:', notes || 'None');
+
+        // Validation
+        if (!walletId || !transactionId) {
+            console.log('❌ Validation failed: Missing required fields');
+            return res.status(400).json({
+                success: false,
+                message: 'Wallet ID and Transaction ID are required'
+            });
+        }
+
+        // Find wallet
+        const wallet = await Wallet.findById(walletId).populate('userId', 'username email');
+        if (!wallet) {
+            console.log('❌ Wallet not found');
+            return res.status(404).json({
+                success: false,
+                message: 'Wallet not found'
+            });
+        }
+
+        // Find transaction
+        const transaction = wallet.transactions.id(transactionId);
+        if (!transaction) {
+            console.log('❌ Transaction not found');
+            return res.status(404).json({
+                success: false,
+                message: 'Transaction not found'
+            });
+        }
+
+        console.log('✅ Found transaction:');
+        console.log('   Type:', transaction.type);
+        console.log('   Amount:', `$${transaction.amount}`);
+        console.log('   Status:', transaction.status);
+        console.log('   Payment Method:', transaction.paymentMethod);
+
+        // Verify it's a deposit
+        if (transaction.type !== 'deposit') {
+            console.log('❌ Not a deposit transaction');
+            return res.status(400).json({
+                success: false,
+                message: 'Only deposit transactions can be manually completed'
+            });
+        }
+
+        // Verify it's pending
+        if (transaction.status !== 'pending') {
+            console.log('❌ Transaction not pending');
+            return res.status(400).json({
+                success: false,
+                message: `Transaction is already ${transaction.status}. Only pending deposits can be manually completed.`
+            });
+        }
+
+        console.log('\n💰 Balance State BEFORE Update:');
+        console.log('   Balance:', wallet.balance);
+        console.log('   Available:', wallet.availableBalance);
+        console.log('   Pending:', wallet.pendingBalance);
+
+        // Mark as completed and add balance
+        transaction.status = 'completed';
+        transaction.completedAt = new Date();
+        
+        // Build description with admin action
+        const adminUsername = req.user.username || 'Admin';
+        transaction.description = transaction.description 
+            ? `${transaction.description} - Manually completed by ${adminUsername}`
+            : `${transaction.paymentMethod || 'Deposit'} - Manually completed by ${adminUsername}`;
+
+        // Add admin notes to transaction metadata
+        const metadata = {
+            manuallyCompleted: true,
+            completedBy: adminUsername,
+            completedByUserId: req.user.userId,
+            completedAt: new Date().toISOString(),
+            adminNotes: notes || 'Manually verified and completed by admin',
+            originalStatus: 'pending',
+            paymentMethod: transaction.paymentMethod,
+            amount: transaction.amount
+        };
+        
+        transaction.notes = JSON.stringify(metadata);
+
+        // Add amount to balance (deposit adds money)
+        wallet.balance += transaction.amount;
+        wallet.updateAvailableBalance();
+
+        await wallet.save();
+
+        console.log('\n💰 Balance State AFTER Update:');
+        console.log('   Balance:', wallet.balance);
+        console.log('   Available:', wallet.availableBalance);
+        console.log('   Pending:', wallet.pendingBalance);
+        console.log('   Amount Added:', `$${transaction.amount}`);
+
+        console.log('\n✅ Deposit manually completed successfully');
+        console.log('🔧 ═══════════════════════════════════════════════════');
+        console.log('✅ MANUAL DEPOSIT COMPLETION SUCCESS');
+        console.log('🔧 ═══════════════════════════════════════════════════\n');
+
+        res.json({
+            success: true,
+            message: `Deposit of $${transaction.amount.toFixed(2)} manually completed successfully`,
+            data: {
+                transactionId: transaction._id,
+                userId: wallet.userId._id,
+                username: wallet.userId.username,
+                userEmail: wallet.userId.email,
+                amount: transaction.amount,
+                previousStatus: 'pending',
+                newStatus: 'completed',
+                paymentMethod: transaction.paymentMethod,
+                completedBy: adminUsername,
+                completedAt: transaction.completedAt,
+                wallet: {
+                    newBalance: wallet.balance,
+                    newAvailableBalance: wallet.availableBalance,
+                    newPendingBalance: wallet.pendingBalance
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('\n❌❌❌ ERROR IN MANUAL DEPOSIT COMPLETION');
+        console.error('Error name:', error.name);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+        console.log('🔧 ═══════════════════════════════════════════════════');
+        console.log('❌ MANUAL DEPOSIT COMPLETION FAILED');
+        console.log('🔧 ═══════════════════════════════════════════════════\n');
+        
+        res.status(500).json({
+            success: false,
+            message: 'Failed to manually complete deposit',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
 // Don't forget to export these new functions
 module.exports = {
     getStats,
@@ -1252,7 +1403,8 @@ module.exports = {
     getTransactionDetails,
     updateUserStatus, // ✅ Add this
     getUserDetails,   // ✅ Add this
-    
+    manualCompleteDeposit,
+
     // Existing exports
     getUsers,
     getGames,

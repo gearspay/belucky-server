@@ -59,6 +59,9 @@ router.get('/transactions/:transactionId', adminDataController.getTransactionDet
 // @body    { walletId, transactionId }
 router.post('/withdrawals/approve', adminDataController.approveWithdrawal);
 
+
+router.post('/deposits/manual-complete', adminDataController.manualCompleteDeposit);
+
 // @route   POST /api/admin-data/withdrawals/reject
 // @desc    Reject withdrawal request and refund to user
 // @access  Private/Admin

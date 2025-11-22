@@ -1162,6 +1162,57 @@ const checkCashappPaymentStatus = async (req, res) => {
 // CHIME PAYMENT METHODS
 // ================================
 
+
+
+
+const matchChimeName = (emailSenderName, dbFullName) => {
+    if (!emailSenderName || !dbFullName) return false;
+
+    // Normalize both names (lowercase, trim, remove extra spaces)
+    const emailName = emailSenderName.toLowerCase().trim().replace(/\s+/g, ' ');
+    const dbName = dbFullName.toLowerCase().trim().replace(/\s+/g, ' ');
+
+    // Exact match (case insensitive)
+    if (emailName === dbName) return true;
+
+    // Split names into parts
+    const emailParts = emailName.split(' ');
+    const dbParts = dbName.split(' ');
+
+    // Need at least first name in both
+    if (emailParts.length === 0 || dbParts.length === 0) return false;
+
+    // Extract first name from both
+    const emailFirstName = emailParts[0];
+    const dbFirstName = dbParts[0];
+
+    // First name must match exactly
+    if (emailFirstName !== dbFirstName) return false;
+
+    // If email only has first name (e.g., "Stephanie"), accept it
+    if (emailParts.length === 1) return true;
+
+    // If DB only has first name, accept it
+    if (dbParts.length === 1) return true;
+
+    // Get last part from email and remove period (e.g., "F." -> "f")
+    const emailLastPart = emailParts[emailParts.length - 1].replace('.', '');
+    
+    // Get last name from database
+    const dbLastName = dbParts[dbParts.length - 1];
+
+    // Check if email has initial (single letter) - e.g., "Stephanie F."
+    if (emailLastPart.length === 1) {
+        // Match first letter of DB last name with email initial
+        return emailLastPart === dbLastName.charAt(0);
+    }
+
+    // Check if email has full last name - e.g., "Stephanie Foster"
+    return emailLastPart === dbLastName;
+};
+
+
+
 // Setup user's Chime details
 const setupChimePayment = async (req, res) => {
     try {
@@ -1425,8 +1476,6 @@ const verifyChimePayment = async (req, res) => {
 
         if (!wallet) {
             console.log('❌ Pending transaction not found');
-            console.log('   User ID:', userId);
-            console.log('   Transaction ID:', transactionId);
             return res.status(404).json({
                 success: false,
                 message: 'Pending Chime transaction not found'
@@ -1448,19 +1497,17 @@ const verifyChimePayment = async (req, res) => {
         console.log('   Amount:', `$${transaction.amount}`);
         console.log('   Status:', transaction.status);
         console.log('   Created:', transaction.createdAt);
-        console.log('   External ID:', transaction.external_id);
 
         // Check if transaction is expired (30 minutes)
         const transactionDate = new Date(transaction.createdAt);
         const now = new Date();
         const timeDiffMinutes = (now - transactionDate) / 1000 / 60;
         
-        console.log('   Age:', `${Math.floor(timeDiffMinutes)} minutes ${Math.floor((timeDiffMinutes % 1) * 60)} seconds`);
+        console.log('   Age:', `${Math.floor(timeDiffMinutes)} minutes`);
 
         if (timeDiffMinutes > 30) {
             console.log('❌ Transaction expired (over 30 minutes old)');
             
-            // Mark as failed
             wallet.updateTransactionStatus(transactionId, 'failed', 'Payment request expired after 30 minutes');
             await wallet.save();
             
@@ -1474,7 +1521,7 @@ const verifyChimePayment = async (req, res) => {
             });
         }
 
-        // Get admin's Chime payment config
+        // Get Chime config
         console.log('\n📥 Fetching Chime configuration...');
         const PaymentMethod = require('../models/PaymentMethod');
         const paymentMethod = await PaymentMethod.findOne({
@@ -1492,12 +1539,9 @@ const verifyChimePayment = async (req, res) => {
 
         const { mailTmUsername, mailTmPassword } = paymentMethod.chimeConfig;
         
-        console.log('✅ Chime config loaded:');
-        console.log('   Mail.tm Username:', mailTmUsername);
-        console.log('   Business Chime Tag:', paymentMethod.chimeConfig.businessChimeTag);
-        console.log('   Business Name:', paymentMethod.chimeConfig.businessChimeName);
+        console.log('✅ Chime config loaded');
 
-        // Get user's Chime details for matching
+        // Get user's Chime details
         console.log('\n👤 Fetching user Chime details...');
         const UserChimeDetails = require('../models/UserChimeDetails');
         const userChimeDetails = await UserChimeDetails.findOne({ 
@@ -1514,11 +1558,9 @@ const verifyChimePayment = async (req, res) => {
         }
 
         const userFullName = userChimeDetails.fullName;
-        const userChimeTag = userChimeDetails.chimeTag;
         
         console.log('✅ User Chime details:');
         console.log('   Full Name:', userFullName);
-        console.log('   Chime Tag:', userChimeTag);
 
         // Login to Mail.tm
         console.log('\n📧 Logging into Mail.tm...');
@@ -1526,17 +1568,14 @@ const verifyChimePayment = async (req, res) => {
         await mailTmService.login(mailTmUsername, mailTmPassword);
         console.log('✅ Mail.tm login successful');
 
-        // Search for payment emails after transaction creation
+        // Search for payment emails
         console.log('\n🔍 Searching for payment emails...');
-        console.log('   Looking for emails after:', transactionDate.toISOString());
-        
         const chimeMessages = await mailTmService.searchChimePayments(transactionDate);
 
         console.log(`📬 Found ${chimeMessages.length} potential payment email(s)`);
 
         if (chimeMessages.length === 0) {
             console.log('⏳ No payment emails found yet');
-            console.log('═══════════════════════════════════════════════════\n');
             
             return res.json({
                 success: false,
@@ -1552,7 +1591,7 @@ const verifyChimePayment = async (req, res) => {
             });
         }
 
-        // Parse and match payments
+        // Parse and match payments with IMPROVED NAME MATCHING
         console.log('\n💰 Parsing and matching payments...');
         let matchedPayment = null;
         
@@ -1560,8 +1599,6 @@ const verifyChimePayment = async (req, res) => {
             const message = chimeMessages[i];
             console.log(`\n   📨 Email ${i + 1}/${chimeMessages.length}:`);
             console.log(`      Subject: "${message.subject}"`);
-            console.log(`      From: ${message.from?.address}`);
-            console.log(`      Date: ${message.createdAt}`);
             
             const paymentDetails = await mailTmService.parseChimePayment(message.id);
             
@@ -1572,41 +1609,26 @@ const verifyChimePayment = async (req, res) => {
                                  Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
             
             console.log(`      💵 Amount:`);
-            console.log(`         Email amount: $${paymentDetails.amount}`);
-            console.log(`         Transaction amount: $${transaction.amount}`);
+            console.log(`         Email: $${paymentDetails.amount}`);
+            console.log(`         Expected: $${transaction.amount}`);
             console.log(`         Match: ${amountMatches ? '✅' : '❌'}`);
             
-            // 2. Name match (check if any part of user's name is in email sender)
-            let nameMatches = false;
-            if (paymentDetails.senderName && userFullName) {
-                const emailName = paymentDetails.senderName.toLowerCase();
-                const userNameParts = userFullName.toLowerCase().split(' ');
-                
-                // Check if any part of the user's name appears in the email sender name
-                nameMatches = userNameParts.some(part => 
-                    part.length > 2 && emailName.includes(part)
-                );
-                
-                console.log(`      👤 Name:`);
-                console.log(`         Email sender: "${paymentDetails.senderName}"`);
-                console.log(`         Expected: "${userFullName}"`);
-                console.log(`         Name parts checked: [${userNameParts.join(', ')}]`);
-                console.log(`         Match: ${nameMatches ? '✅' : '❌'}`);
-            } else {
-                console.log(`      👤 Name: ❌ (Missing sender name in email)`);
-            }
+            // 2. IMPROVED NAME MATCHING - Using new function
+            const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
+            
+            console.log(`      👤 Name:`);
+            console.log(`         Email sender: "${paymentDetails.senderName}"`);
+            console.log(`         Expected: "${userFullName}"`);
+            console.log(`         Match: ${nameMatches ? '✅' : '❌'}`);
 
-            // 3. Date match (after transaction creation and within 30 minutes)
+            // 3. Date match
             const emailDate = new Date(paymentDetails.date);
             const timeDiff = emailDate - transactionDate;
-            const timeDiffSeconds = timeDiff / 1000;
             const dateMatches = timeDiff > 0 && timeDiff <= 30 * 60 * 1000;
             
             console.log(`      📅 Date:`);
-            console.log(`         Email date: ${emailDate.toISOString()}`);
-            console.log(`         Transaction date: ${transactionDate.toISOString()}`);
-            console.log(`         Time difference: ${Math.floor(timeDiffSeconds)} seconds`);
-            console.log(`         Within 30 min window: ${dateMatches ? '✅' : '❌'}`);
+            console.log(`         Time difference: ${Math.floor(timeDiff / 1000)} seconds`);
+            console.log(`         Match: ${dateMatches ? '✅' : '❌'}`);
 
             // Check if all criteria match
             if (amountMatches && nameMatches && dateMatches) {
@@ -1620,11 +1642,6 @@ const verifyChimePayment = async (req, res) => {
 
         if (matchedPayment) {
             console.log('\n✅ PAYMENT VERIFICATION SUCCESSFUL!');
-            console.log('   Matched payment details:');
-            console.log('   - Sender:', matchedPayment.senderName);
-            console.log('   - Amount:', `$${matchedPayment.amount}`);
-            console.log('   - Chime Tag:', matchedPayment.chimeTag);
-            console.log('   - Email Subject:', matchedPayment.subject);
             
             // Payment found - mark as completed
             const metadata = {
@@ -1676,14 +1693,11 @@ const verifyChimePayment = async (req, res) => {
             console.log('\n⏳ PAYMENT NOT VERIFIED YET');
             console.log(`   Checked ${chimeMessages.length} email(s)`);
             console.log(`   No matching payment found`);
-            console.log(`   Transaction age: ${Math.floor(timeDiffMinutes)} minutes`);
-            console.log(`   Time remaining: ${Math.max(0, 30 - Math.floor(timeDiffMinutes))} minutes`);
             
             console.log('\n═══════════════════════════════════════════════════');
             console.log('⏳ VERIFY CHIME PAYMENT PENDING');
             console.log('═══════════════════════════════════════════════════\n');
             
-            // Payment not found yet
             res.json({
                 success: false,
                 message: 'Payment not verified yet. Please ensure you sent exactly the correct amount to the correct Chime tag, then wait a few minutes and try again.',
@@ -1716,8 +1730,6 @@ const verifyChimePayment = async (req, res) => {
         });
     }
 };
-
-// Complete autoVerifyChimePayments function for paymentController.js (Cron Job)
 
 // Complete autoVerifyChimePayments function for paymentController.js (Cron Job)
 
@@ -1763,10 +1775,7 @@ const autoVerifyChimePayments = async () => {
             return;
         }
 
-        console.log('✅ Chime config loaded:');
-        console.log('   Mail.tm Username:', chimeConfig.mailTmUsername);
-        console.log('   Business Chime Tag:', chimeConfig.businessChimeTag);
-        console.log('   Business Name:', chimeConfig.businessChimeName);
+        console.log('✅ Chime config loaded');
 
         // Login to Mail.tm once for all verifications
         console.log('\n📧 Logging into Mail.tm...');
@@ -1799,19 +1808,17 @@ const autoVerifyChimePayments = async () => {
                     console.log(`     ID: ${transaction._id}`);
                     console.log(`     Amount: $${transaction.amount}`);
                     console.log(`     Created: ${transaction.createdAt}`);
-                    console.log(`     External ID: ${transaction.external_id}`);
 
                     // Check if transaction is expired (30 minutes)
                     const transactionDate = new Date(transaction.createdAt);
                     const now = new Date();
                     const timeDiffMinutes = (now - transactionDate) / 1000 / 60;
                     
-                    console.log(`     Age: ${Math.floor(timeDiffMinutes)} minutes ${Math.floor((timeDiffMinutes % 1) * 60)} seconds`);
+                    console.log(`     Age: ${Math.floor(timeDiffMinutes)} minutes`);
 
                     if (timeDiffMinutes > 30) {
                         console.log('     ⏰ Transaction EXPIRED (over 30 minutes)');
                         
-                        // Mark as failed
                         wallet.updateTransactionStatus(
                             transaction._id,
                             'failed',
@@ -1839,9 +1846,8 @@ const autoVerifyChimePayments = async () => {
                     }
 
                     const userFullName = userChimeDetails.fullName;
-                    const userChimeTag = userChimeDetails.chimeTag;
                     
-                    console.log(`     👤 User: ${userFullName} (${userChimeTag})`);
+                    console.log(`     👤 User: ${userFullName}`);
 
                     // Search for payments after transaction creation
                     const chimeMessages = await mailTmService.searchChimePayments(transactionDate);
@@ -1853,7 +1859,7 @@ const autoVerifyChimePayments = async () => {
                         continue;
                     }
 
-                    // Match payment
+                    // Match payment with IMPROVED NAME MATCHING
                     let matched = false;
                     
                     for (let i = 0; i < chimeMessages.length; i++) {
@@ -1867,16 +1873,8 @@ const autoVerifyChimePayments = async () => {
                         const amountMatches = paymentDetails.amount &&
                                             Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
 
-                        // 2. Name match (check if any part of user's name is in email sender)
-                        let nameMatches = false;
-                        if (paymentDetails.senderName && userFullName) {
-                            const emailName = paymentDetails.senderName.toLowerCase();
-                            const userNameParts = userFullName.toLowerCase().split(' ');
-                            
-                            nameMatches = userNameParts.some(part => 
-                                part.length > 2 && emailName.includes(part)
-                            );
-                        }
+                        // 2. IMPROVED NAME MATCHING - Using new function
+                        const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
 
                         // 3. Date match (after transaction, within 30 minutes)
                         const emailDate = new Date(paymentDetails.date);
@@ -1934,9 +1932,6 @@ const autoVerifyChimePayments = async () => {
                 } catch (error) {
                     console.error(`     ❌ Error verifying transaction ${transaction._id}:`);
                     console.error(`        ${error.message}`);
-                    if (process.env.NODE_ENV === 'development') {
-                        console.error(`        Stack:`, error.stack);
-                    }
                 }
             }
         }
