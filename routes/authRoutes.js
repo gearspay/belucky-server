@@ -1,6 +1,8 @@
 // routes/authRoutes.js
 const express = require('express');
 const {
+  sendOTP,          // ✅ NEW
+  verifyOTP,        // ✅ NEW
   register,
   login,
   changePassword,
@@ -12,8 +14,26 @@ const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
+// ========================================
+// NEW: OTP ROUTES
+// ========================================
+
+// @route   POST /api/auth/send-otp
+// @desc    Send OTP to email for verification
+// @access  Public
+router.post('/send-otp', sendOTP);
+
+// @route   POST /api/auth/verify-otp
+// @desc    Verify OTP code
+// @access  Public
+router.post('/verify-otp', verifyOTP);
+
+// ========================================
+// EXISTING ROUTES
+// ========================================
+
 // @route   POST /api/auth/register
-// @desc    Register a new user
+// @desc    Register a new user (NOW REQUIRES VERIFIED EMAIL)
 // @access  Public
 router.post('/register', register);
 

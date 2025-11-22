@@ -43,8 +43,15 @@ const userSchema = new mongoose.Schema({
     },
     email: {
       type: String,
-      default: null,
-      lowercase: true
+      required: [true, 'Email is required'], // ✅ NOW MANDATORY
+      unique: true, // ✅ PREVENT DUPLICATE EMAILS
+      lowercase: true,
+      trim: true,
+      match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email address']
+    },
+    emailVerified: {
+      type: Boolean,
+      default: false // ✅ TRACK EMAIL VERIFICATION STATUS
     },
     phone: {
       type: String,
@@ -89,6 +96,7 @@ const userSchema = new mongoose.Schema({
 
 // Indexes for performance
 userSchema.index({ username: 1 });
+userSchema.index({ 'profile.email': 1 }); // ✅ INDEX FOR EMAIL LOOKUPS
 userSchema.index({ affiliateId: 1 });
 userSchema.index({ 'account.isActive': 1 });
 

@@ -1,20 +1,207 @@
 // controllers/authController.js
 const User = require('../models/User');
+const OTP = require('../models/OTP');
 const Referral = require('../models/Referral');
 const Wallet = require('../models/Wallet');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const emailService = require('../services/emailService');
 
+// ========================================
+// NEW: SEND OTP FOR EMAIL VERIFICATION
+// ========================================
+const sendOTP = async (req, res) => {
+  const { email, purpose = 'registration', referralCode } = req.body;
+
+  // Validate email
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Valid email is required'
+    });
+  }
+
+  const lowercaseEmail = email.toLowerCase().trim();
+
+  try {
+    // Check if email already exists in database (for registration)
+    if (purpose === 'registration') {
+      const existingUser = await User.findOne({ 'profile.email': lowercaseEmail });
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'Email already registered. Please login instead.'
+        });
+      }
+    }
+
+    // Rate limiting: Check how many OTPs sent in last minute
+    const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+    const recentOTPs = await OTP.countDocuments({
+      email: lowercaseEmail,
+      purpose,
+      createdAt: { $gte: oneMinuteAgo }
+    });
+
+    const maxRequestsPerMinute = parseInt(process.env.OTP_RATE_LIMIT_MAX_REQUESTS) || 3;
+    if (recentOTPs >= maxRequestsPerMinute) {
+      return res.status(429).json({
+        success: false,
+        message: 'Too many OTP requests. Please wait a minute and try again.'
+      });
+    }
+
+    // Clean up old unverified OTPs for this email
+    await OTP.cleanupOldOTPs(lowercaseEmail, purpose);
+
+    // Generate new OTP
+    const otpCode = OTP.generateOTP();
+    const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 10;
+    const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
+
+    // Save OTP to database
+    const newOTP = await OTP.create({
+      email: lowercaseEmail,
+      otp: otpCode,
+      purpose,
+      expiresAt,
+      metadata: {
+        ipAddress: req.ip,
+        userAgent: req.get('User-Agent'),
+        referralCode: referralCode || null
+      }
+    });
+
+    // Send OTP via email
+    try {
+      await emailService.sendOTP(lowercaseEmail, otpCode, purpose);
+    } catch (emailError) {
+      console.error('Error sending OTP email:', emailError);
+      // Delete the OTP if email fails
+      await OTP.findByIdAndDelete(newOTP._id);
+      
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send verification email. Please check your email address and try again.'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Verification code sent to ${lowercaseEmail}`,
+      data: {
+        email: lowercaseEmail,
+        expiresIn: expiryMinutes,
+        purpose
+      }
+    });
+
+  } catch (error) {
+    console.error('Error sending OTP:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error sending verification code',
+      error: error.message
+    });
+  }
+};
+
+// ========================================
+// NEW: VERIFY OTP
+// ========================================
+const verifyOTP = async (req, res) => {
+  const { email, otp, purpose = 'registration' } = req.body;
+
+  // Validate inputs
+  if (!email || !otp) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email and OTP are required'
+    });
+  }
+
+  const lowercaseEmail = email.toLowerCase().trim();
+
+  try {
+    // Find the latest unverified OTP for this email and purpose
+    const otpRecord = await OTP.findOne({
+      email: lowercaseEmail,
+      purpose,
+      verified: false
+    }).sort({ createdAt: -1 });
+
+    if (!otpRecord) {
+      return res.status(404).json({
+        success: false,
+        message: 'No verification code found. Please request a new one.'
+      });
+    }
+
+    // Check if OTP is expired
+    if (otpRecord.isExpired()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Verification code has expired. Please request a new one.'
+      });
+    }
+
+    // Check if max attempts exceeded
+    if (otpRecord.hasExceededAttempts()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Maximum verification attempts exceeded. Please request a new code.'
+      });
+    }
+
+    // Increment attempts
+    otpRecord.attempts += 1;
+    await otpRecord.save();
+
+    // Verify OTP
+    if (otpRecord.otp !== otp) {
+      const remainingAttempts = otpRecord.maxAttempts - otpRecord.attempts;
+      return res.status(400).json({
+        success: false,
+        message: `Invalid verification code. ${remainingAttempts} attempt(s) remaining.`
+      });
+    }
+
+    // Mark OTP as verified
+    otpRecord.verified = true;
+    await otpRecord.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Email verified successfully!',
+      data: {
+        email: lowercaseEmail,
+        verified: true,
+        referralCode: otpRecord.metadata?.referralCode || null
+      }
+    });
+
+  } catch (error) {
+    console.error('Error verifying OTP:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error verifying code',
+      error: error.message
+    });
+  }
+};
+
+// ========================================
+// UPDATED: REGISTER (NOW REQUIRES VERIFIED EMAIL)
+// ========================================
 const register = async (req, res) => {
   const role = 2;
-  const { username, password = 'user', affiliateUsername } = req.body;
-  console.log(req.body);
+  const { username, password, email, affiliateUsername } = req.body;
 
   // Validate input
-  if (!username || !password) {
+  if (!username || !password || !email) {
     return res.status(400).json({ 
       success: false,
-      message: 'Username and password are required' 
+      message: 'Username, password, and email are required' 
     });
   }
 
@@ -34,30 +221,68 @@ const register = async (req, res) => {
     });
   }
 
+  const lowercaseEmail = email.toLowerCase().trim();
+
   try {
+    // ✅ CHECK IF EMAIL IS VERIFIED
+    const verifiedOTP = await OTP.findOne({
+      email: lowercaseEmail,
+      purpose: 'registration',
+      verified: true
+    }).sort({ createdAt: -1 });
+
+    if (!verifiedOTP) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email not verified. Please verify your email first.'
+      });
+    }
+
+    // Check if OTP verification is recent (within 30 minutes)
+    const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+    if (verifiedOTP.createdAt < thirtyMinutesAgo) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email verification expired. Please verify again.'
+      });
+    }
+
     // Check if username already exists
-    const existingUser = await User.findOne({ username: username.toLowerCase() });
-    if (existingUser) {
+    const existingUsername = await User.findOne({ username: username.toLowerCase() });
+    if (existingUsername) {
       return res.status(409).json({ 
         success: false,
         message: 'Username already exists' 
       });
     }
 
+    // Check if email already exists
+    const existingEmail = await User.findOne({ 'profile.email': lowercaseEmail });
+    if (existingEmail) {
+      return res.status(409).json({ 
+        success: false,
+        message: 'Email already registered' 
+      });
+    }
+
     // Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create a new user instance (without affiliateId initially)
+    // Create a new user instance
     const user = new User({
       username: username.toLowerCase(),
       password: hashedPassword,
-      role
+      role,
+      profile: {
+        email: lowercaseEmail,
+        emailVerified: true // ✅ Mark as verified
+      }
     });
 
     // Save the new user to the database
     const newUser = await user.save();
 
-    // ✅ AWARD $5 SIGNUP BONUS TO EVERY NEW USER (IN BONUS WALLET)
+    // ✅ AWARD $3 SIGNUP BONUS TO EVERY NEW USER
     try {
       const newUserWallet = await Wallet.findOrCreateWallet(newUser._id);
       newUserWallet.addTransaction({
@@ -79,69 +304,55 @@ const register = async (req, res) => {
 
     // Handle referral code if provided
     let referralApplied = false;
-    let referralCode = null;
-    console.log('Referral code provided:', affiliateUsername);
+    let referralCode = affiliateUsername || verifiedOTP.metadata?.referralCode;
     
-    if (affiliateUsername) {
+    if (referralCode) {
       try {
-        // Find the TEMPLATE referral (where referredUserId is null)
         const referralTemplate = await Referral.findOne({
-          referralCode: affiliateUsername.toUpperCase(),
-          referredUserId: null // IMPORTANT: Only find templates
+          referralCode: referralCode.toUpperCase(),
+          referredUserId: null
         }).populate('referrerId', 'username');
 
         if (!referralTemplate) {
-          console.log('Invalid referral code provided:', affiliateUsername);
+          console.log('Invalid referral code provided:', referralCode);
+        } else if (referralTemplate.referrerId._id.toString() === newUser._id.toString()) {
+          console.log('User tried to refer themselves');
         } else {
-          // Check if user is trying to refer themselves
-          if (referralTemplate.referrerId._id.toString() === newUser._id.toString()) {
-            console.log('User tried to refer themselves');
-          } else {
-            // Check if this user has already been referred
-            const alreadyReferred = await Referral.findOne({
-              referredUserId: newUser._id
+          const alreadyReferred = await Referral.findOne({
+            referredUserId: newUser._id
+          });
+
+          if (!alreadyReferred) {
+            await User.findByIdAndUpdate(newUser._id, {
+              affiliateId: referralTemplate.referrerId._id
             });
 
-            if (alreadyReferred) {
-              console.log('User has already been referred');
-            } else {
-              // Update the user with affiliate information
-              await User.findByIdAndUpdate(newUser._id, {
-                affiliateId: referralTemplate.referrerId._id
-              });
+            await Referral.create({
+              referrerId: referralTemplate.referrerId._id,
+              referredUserId: newUser._id,
+              referralCode: referralCode.toUpperCase(),
+              status: 'pending',
+              rewards: {
+                referrerReward: 0,
+                referredReward: 5,
+                rewardType: 'percentage'
+              },
+              conditions: {
+                minDeposit: 10,
+                minGamesPlayed: 1,
+                maxRewardDeposits: 5
+              },
+              metadata: {
+                referredUserIP: req.ip,
+                referredUserAgent: req.get('User-Agent'),
+                referralSource: 'registration',
+                depositCount: 0,
+                totalReferralEarnings: 0
+              }
+            });
 
-              // CREATE A NEW referral record for this specific referred user
-              const newReferral = await Referral.create({
-                referrerId: referralTemplate.referrerId._id,
-                referredUserId: newUser._id,
-                referralCode: affiliateUsername.toUpperCase(),
-                status: 'pending',
-                rewards: {
-                  referrerReward: 0,
-                  referredReward: 5,
-                  rewardType: 'percentage'
-                },
-                conditions: {
-                  minDeposit: 10,
-                  minGamesPlayed: 1,
-                  maxRewardDeposits: 5
-                },
-                metadata: {
-                  referredUserIP: req.ip,
-                  referredUserAgent: req.get('User-Agent'),
-                  referralSource: 'registration',
-                  depositCount: 0,
-                  totalReferralEarnings: 0
-                }
-              });
-
-              // ✅ NO IMMEDIATE BONUS - Referrer gets rewards later when this user deposits
-              // The referral bonus will be processed by processDepositReferral() in referralController
-
-              referralApplied = true;
-              referralCode = affiliateUsername.toUpperCase();
-              console.log('Referral applied successfully:', referralCode);
-            }
+            referralApplied = true;
+            console.log('Referral applied successfully:', referralCode);
           }
         }
       } catch (referralError) {
@@ -149,23 +360,35 @@ const register = async (req, res) => {
       }
     }
 
+    // Delete used OTP
+    await OTP.findByIdAndDelete(verifiedOTP._id);
+
+    // Send welcome email (non-blocking)
+    emailService.sendWelcomeEmail(lowercaseEmail, username).catch(err => {
+      console.error('Error sending welcome email:', err);
+    });
+
     // Don't send password back in response
     const userResponse = {
       _id: newUser._id,
       username: newUser.username,
       role: newUser.role,
       affiliateId: newUser.affiliateId || null,
+      profile: {
+        email: lowercaseEmail,
+        emailVerified: true
+      }
     };
 
     res.status(201).json({
       success: true,
       message: referralApplied ? 
-        `User created successfully with referral code ${referralCode}! $5 signup bonus added to your wallet.` : 
-        'User created successfully! $5 signup bonus added to your wallet.',
+        `Account created successfully with referral code ${referralCode}! $3 signup bonus added.` : 
+        'Account created successfully! $3 signup bonus added.',
       data: {
         user: userResponse,
         referralApplied,
-        signupBonus: 5
+        signupBonus: 3
       }
     });
 
@@ -173,9 +396,10 @@ const register = async (req, res) => {
     console.error('Error creating user:', error);
     
     if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
       return res.status(409).json({
         success: false,
-        message: 'Username already exists',
+        message: field === 'username' ? 'Username already exists' : 'Email already registered',
       });
     }
 
@@ -187,10 +411,12 @@ const register = async (req, res) => {
   }
 };
 
+// ========================================
+// LOGIN (NO CHANGES NEEDED)
+// ========================================
 const login = async (req, res) => {
   const { username, password } = req.body;
 
-  // Validate input
   if (!username || !password) {
     return res.status(400).json({ 
       success: false,
@@ -199,14 +425,10 @@ const login = async (req, res) => {
   }
 
   try {
-    // Check if the user exists - using case-insensitive search
     const lowercaseUsername = username.toLowerCase();
-    console.log('username (lowercase):', lowercaseUsername);
-    
     const user = await User.findOne({ 
       username: { $regex: new RegExp(`^${lowercaseUsername}$`, 'i') } 
     });
-    console.log('User found:', user ? 'Yes' : 'No');
     
     if (!user) {
       return res.status(404).json({ 
@@ -215,7 +437,6 @@ const login = async (req, res) => {
       });
     }
 
-    // Check if account is active
     if (!user.account.isActive) {
       return res.status(403).json({
         success: false,
@@ -223,7 +444,6 @@ const login = async (req, res) => {
       });
     }
 
-    // Compare the password
     const passwordCheck = await bcrypt.compare(password, user.password);
 
     if (!passwordCheck) {
@@ -233,7 +453,6 @@ const login = async (req, res) => {
       });
     }
 
-    // Generate JWT token
     const token = jwt.sign(
       {
         userId: user._id,
@@ -244,14 +463,10 @@ const login = async (req, res) => {
       { expiresIn: '24h' }
     );
 
-    // Update last login
     await User.findByIdAndUpdate(user._id, {
       'account.lastLogin': new Date()
     });
 
-    console.log('Sending login response with profile:', user.profile);
-
-    // Send success response with complete user data
     res.status(200).json({
       success: true,
       message: 'Login Successful',
@@ -265,6 +480,7 @@ const login = async (req, res) => {
             firstName: user.profile?.firstName || null,
             lastName: user.profile?.lastName || null,
             email: user.profile?.email || null,
+            emailVerified: user.profile?.emailVerified || false,
             phone: user.profile?.phone || null,
             avatar: user.profile?.avatar || null
           },
@@ -284,12 +500,11 @@ const login = async (req, res) => {
   }
 };
 
+// Other existing functions remain the same
 const changePassword = async (req, res) => {
   const userId = req.user.userId;
   const { currentPassword, newPassword } = req.body;
-  console.log(req.body);
 
-  // Validate inputs
   if (!currentPassword) {
     return res.status(400).json({
       success: false,
@@ -305,7 +520,6 @@ const changePassword = async (req, res) => {
   }
 
   try {
-    // Find user
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
@@ -314,7 +528,6 @@ const changePassword = async (req, res) => {
       });
     }
 
-    // Verify current password
     const isPasswordCorrect = await bcrypt.compare(currentPassword, user.password);
     if (!isPasswordCorrect) {
       return res.status(400).json({
@@ -323,10 +536,8 @@ const changePassword = async (req, res) => {
       });
     }
 
-    // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    // Update password
     await User.findByIdAndUpdate(userId, {
       password: hashedPassword
     });
@@ -350,7 +561,6 @@ const changePin = async (req, res) => {
   const userId = req.user.userId;
   const { pin, oldPin } = req.body;
 
-  // Validate PIN
   if (!pin || pin.length !== 4) {
     return res.status(400).json({
       success: false,
@@ -359,7 +569,6 @@ const changePin = async (req, res) => {
   }
 
   try {
-    // Find user
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
@@ -368,7 +577,6 @@ const changePin = async (req, res) => {
       });
     }
 
-    // Check if user has existing PIN
     if (user.pin && user.pin !== oldPin) {
       return res.status(402).json({
         success: false,
@@ -376,14 +584,9 @@ const changePin = async (req, res) => {
       });
     }
 
-    console.log(pin);
-    
-    // Update user with new PIN
-    const data = await User.findByIdAndUpdate(userId, {
+    await User.findByIdAndUpdate(userId, {
       pin: pin
     });
-    
-    console.log(data);
     
     res.status(200).json({
       success: true,
@@ -402,7 +605,6 @@ const changePin = async (req, res) => {
 
 const getCurrentUser = async (req, res) => {
   try {
-    // Fetch user with fresh data from database
     const user = await User.findById(req.user.userId).select('-password').lean();
     
     if (!user) {
@@ -411,8 +613,6 @@ const getCurrentUser = async (req, res) => {
         message: 'User not found'
       });
     }
-
-    console.log('Full user from DB:', JSON.stringify(user, null, 2));
 
     res.status(200).json({
       success: true,
@@ -426,6 +626,7 @@ const getCurrentUser = async (req, res) => {
             firstName: user.profile?.firstName || null,
             lastName: user.profile?.lastName || null,
             email: user.profile?.email || null,
+            emailVerified: user.profile?.emailVerified || false,
             phone: user.profile?.phone || null,
             avatar: user.profile?.avatar || null
           },
@@ -453,20 +654,16 @@ const updateProfile = async (req, res) => {
   const { username, firstName, lastName, email, phone } = req.body;
 
   try {
-    // Build update object
     const updateData = {};
     
-    // Handle username update separately (if provided and different)
     if (username) {
       const lowercaseUsername = username.toLowerCase();
       
-      // Check if username is being changed
       const currentUser = await User.findById(userId);
       if (currentUser.username !== lowercaseUsername) {
-        // Check if new username already exists
         const existingUser = await User.findOne({ 
           username: lowercaseUsername,
-          _id: { $ne: userId } // Exclude current user
+          _id: { $ne: userId }
         });
         
         if (existingUser) {
@@ -480,13 +677,11 @@ const updateProfile = async (req, res) => {
       }
     }
     
-    // Handle profile fields - only update if provided
     if (firstName !== undefined) updateData['profile.firstName'] = firstName;
     if (lastName !== undefined) updateData['profile.lastName'] = lastName;
     if (email !== undefined) updateData['profile.email'] = email;
     if (phone !== undefined) updateData['profile.phone'] = phone;
 
-    // Only update if there are changes
     if (Object.keys(updateData).length === 0) {
       return res.status(400).json({
         success: false,
@@ -519,6 +714,7 @@ const updateProfile = async (req, res) => {
             firstName: user.profile?.firstName || null,
             lastName: user.profile?.lastName || null,
             email: user.profile?.email || null,
+            emailVerified: user.profile?.emailVerified || false,
             phone: user.profile?.phone || null,
             avatar: user.profile?.avatar || null
           },
@@ -531,7 +727,6 @@ const updateProfile = async (req, res) => {
   } catch (error) {
     console.error('Error updating profile:', error);
     
-    // Handle validation errors
     if (error.name === 'ValidationError') {
       return res.status(400).json({
         success: false,
@@ -549,7 +744,9 @@ const updateProfile = async (req, res) => {
 };
 
 module.exports = {
-  register,
+  sendOTP,        // ✅ NEW
+  verifyOTP,      // ✅ NEW
+  register,       // ✅ UPDATED
   login,
   changePassword,
   changePin,
