@@ -131,8 +131,11 @@ class MailTmService {
             // "Jane Smith sent you $100"
             let senderName = null;
             
-            // Try to extract from "FirstName LastName sent you" format
-            const senderNameMatch = subject.match(/^(.+?)\s+sent you/i);
+            // Remove "Fwd: " or "Re: " prefixes first
+let cleanSubject = subject.replace(/^(Fwd|Re):\s*/i, '');
+
+// Then extract the name
+const senderNameMatch = cleanSubject.match(/^(.+?)\s+(?:sent you|just sent you)/i);
             if (senderNameMatch) {
                 senderName = senderNameMatch[1].trim();
             }
