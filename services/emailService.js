@@ -10,8 +10,9 @@ class EmailService {
     // Remove trailing slash if exists
     this.websiteUrl = this.websiteUrl.replace(/\/$/, '');
     
-    // Use Cloudinary logo URL from environment variable, fallback to Imgur
-    this.logoUrl = process.env.LOGO_URL || 'https://i.imgur.com/XCWdVBK.png';
+    // Use Cloudinary logo URL from environment variable, fallback to default
+    this.logoUrl = process.env.LOGO_URL || 'https://belucky.win/images/logo.png';
+    this.facebookLogoUrl = 'https://belucky.win/images/facebook.png';
     console.log('✅ Using logo from:', this.logoUrl);
   }
 
@@ -44,6 +45,82 @@ class EmailService {
       address: process.env.SMTP_FROM_EMAIL || 'noreply@belucky.win',
       name: process.env.SMTP_FROM_NAME || 'Belucky'
     };
+  }
+
+  // Add user to Mailtrap contact list for bulk campaigns
+  async addToMailtrapContactList(email, username) {
+    try {
+      const accountId = process.env.MAILTRAP_ACCOUNT_ID;
+      const listId = process.env.MAILTRAP_LIST_ID || '1'; // Default to 1 if not set
+      
+      if (!accountId) {
+        console.log('⚠️ MAILTRAP_ACCOUNT_ID not set, skipping contact list addition');
+        return { success: false, error: 'MAILTRAP_ACCOUNT_ID not configured' };
+      }
+
+      const response = await fetch(`https://mailtrap.io/api/accounts/${accountId}/contacts`, {
+        method: 'POST',
+        headers: {
+          'Api-Token': process.env.MAILTRAP_API_TOKEN,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          contact: {
+            email: email,
+            fields: {
+              name: username
+            },
+            list_ids: [parseInt(listId)]
+          }
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ Mailtrap API error:', response.status, errorText);
+        return { success: false, error: errorText };
+      }
+
+      const data = await response.json();
+      console.log('✅ Contact added to Mailtrap list:', email);
+      return { success: true, data };
+    } catch (error) {
+      console.error('❌ Error adding contact to Mailtrap:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  // Remove user from Mailtrap contact list when they unsubscribe
+  async removeFromMailtrapContactList(email) {
+    try {
+      const accountId = process.env.MAILTRAP_ACCOUNT_ID;
+      
+      if (!accountId) {
+        console.log('⚠️ MAILTRAP_ACCOUNT_ID not set, skipping contact removal');
+        return { success: false, error: 'MAILTRAP_ACCOUNT_ID not configured' };
+      }
+
+      const response = await fetch(`https://mailtrap.io/api/accounts/${accountId}/contacts/${encodeURIComponent(email)}`, {
+        method: 'DELETE',
+        headers: {
+          'Api-Token': process.env.MAILTRAP_API_TOKEN,
+          'Content-Type': 'application/json',
+        }
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ Mailtrap API error:', response.status, errorText);
+        return { success: false, error: errorText };
+      }
+
+      console.log('✅ Contact removed from Mailtrap list:', email);
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Error removing contact from Mailtrap:', error);
+      return { success: false, error: error.message };
+    }
   }
 
   // Send OTP email
@@ -97,9 +174,11 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 .warning-text { margin: 0; color: #92400e; font-size: 13px; line-height: 1.6; }
 .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
 .footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.footer-link { display: inline-block; color: #1877f2; text-decoration: none; font-weight: 600; font-size: 14px; margin-bottom: 15px; }
-.footer-link:hover { text-decoration: underline; }
-.footer-copy { margin: 0; color: #9ca3af; font-size: 12px; }
+.social-link { display: inline-block; margin: 0 5px 15px 5px; }
+.social-link img { width: 32px; height: 32px; }
+.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
+.unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
+.unsubscribe:hover { text-decoration: underline; }
 @media only screen and (max-width: 600px) {
   .wrapper { padding: 20px 10px; }
   .container { border-radius: 10px; }
@@ -134,8 +213,11 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
     </div>
     <div class="footer">
       <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="footer-link">Visit Belucky Win on Facebook</a>
-      <p class="footer-copy" style="margin-top: 20px;">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="https://www.facebook.com/belucky.win" class="social-link">
+        <img src="${this.facebookLogoUrl}" alt="Facebook" />
+      </a>
+      <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="${this.websiteUrl}/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>
   </div>
 </div>
@@ -168,6 +250,9 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
   async sendWelcomeEmail(email, username) {
     this.init();
 
+    // Add user to Mailtrap contact list for future bulk campaigns
+    await this.addToMailtrapContactList(email, username);
+
     const htmlContent = `
 <!DOCTYPE html>
 <html>
@@ -178,31 +263,33 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; }
 .wrapper { background: #f5f5f5; padding: 40px 20px; }
 .container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-.header { background: #ffffff; padding: 20px 30px 10px 30px; text-align: center; }
-.content { padding: 20px 30px 40px 30px; background: #ffffff; }
-.title { margin: 0 0 15px 0; color: #111827; font-size: 30px; font-weight: 700; text-align: center; }
-.message { margin: 0 0 30px 0; color: #6b7280; font-size: 16px; text-align: center; line-height: 1.6; }
-.bonus-card { background: linear-gradient(135deg, #f3e8ff 0%, #e9d5ff 100%); border: 2px solid #a855f7; border-radius: 16px; padding: 35px 25px; margin: 0 auto 30px; max-width: 400px; text-align: center; }
-.bonus-label { margin: 0 0 10px 0; color: #7c3aed; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; }
-.bonus-amount { margin: 0; color: #7c3aed; font-size: 44px; font-weight: bold; }
-.bonus-text { margin: 10px 0 0 0; color: #7c3aed; font-size: 14px; font-weight: 500; }
-.cta-button { display: inline-block; background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%); color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 12px; font-weight: 600; font-size: 16px; margin-bottom: 20px; }
-.sub-message { margin: 0; color: #9ca3af; font-size: 13px; text-align: center; }
+.header { background: #ffffff; padding: 30px 30px 20px 30px; text-align: center; }
+.content { padding: 30px 40px 40px 40px; background: #ffffff; }
+.greeting { margin: 0 0 10px 0; color: #6b7280; font-size: 16px; }
+.title { margin: 0 0 25px 0; color: #111827; font-size: 32px; font-weight: 700; line-height: 1.2; }
+.intro-text { margin: 0 0 30px 0; color: #4b5563; font-size: 16px; line-height: 1.6; }
+.features-box { background: #f9fafb; border-radius: 12px; padding: 30px; margin: 0 0 30px 0; }
+.feature-item { margin: 0 0 18px 0; color: #374151; font-size: 15px; line-height: 1.6; padding-left: 28px; position: relative; }
+.feature-item:last-child { margin-bottom: 0; }
+.feature-item:before { content: "✓"; position: absolute; left: 0; color: #10b981; font-weight: bold; font-size: 18px; }
+.closing-text { margin: 0 0 8px 0; color: #6b7280; font-size: 15px; line-height: 1.6; }
+.signature { margin: 0; color: #374151; font-size: 15px; font-weight: 600; }
 .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
 .footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.footer-link { display: inline-block; color: #1877f2; text-decoration: none; font-weight: 600; font-size: 14px; margin-bottom: 15px; }
-.footer-link:hover { text-decoration: underline; }
-.footer-copy { margin: 0; color: #9ca3af; font-size: 12px; }
+.social-link { display: inline-block; margin: 0 5px 15px 5px; }
+.social-link img { width: 32px; height: 32px; }
+.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
+.unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
+.unsubscribe:hover { text-decoration: underline; }
 @media only screen and (max-width: 600px) {
   .wrapper { padding: 20px 10px; }
   .container { border-radius: 10px; }
-  .header { padding: 15px 20px 10px 20px; }
-  .content { padding: 20px 15px 30px 15px; }
-  .title { font-size: 24px; }
-  .message { font-size: 14px; }
-  .bonus-amount { font-size: 36px; }
-  .bonus-card { padding: 25px 20px; }
-  .cta-button { padding: 14px 32px; font-size: 15px; }
+  .header { padding: 20px 20px 15px 20px; }
+  .content { padding: 25px 20px 30px 20px; }
+  .title { font-size: 26px; }
+  .intro-text { font-size: 15px; }
+  .features-box { padding: 20px; }
+  .feature-item { font-size: 14px; }
   .footer { padding: 20px 15px; }
 }
 </style>
@@ -211,25 +298,29 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 <div class="wrapper">
   <div class="container">
     <div class="header">
-      <img src="${this.logoUrl}" alt="Belucky" width="140" style="max-width: 140px; height: auto;">
+      <img src="${this.logoUrl}" alt="Belucky" width="150" style="max-width: 150px; height: auto;">
     </div>
     <div class="content">
-      <h2 class="title">Welcome to Belucky!</h2>
-      <p class="message">Hi <strong style="color: #111827;">${username}</strong>, your account is ready.<br>Let's get started!</p>
-      <div class="bonus-card">
-        <p class="bonus-label">Welcome Bonus</p>
-        <div class="bonus-amount">$3.00</div>
-        <p class="bonus-text">Added to your account</p>
+      <p class="greeting">Hello <strong style="color: #111827;">${username}</strong>,</p>
+      <h1 class="title">Welcome To Belucky!</h1>
+      <p class="intro-text">We're excited to have you as part of our community. You have a bonus waiting for you!</p>
+      
+      <div class="features-box">
+        <div class="feature-item">Fast, secure, and hassle-free deposits & withdrawals</div>
+        <div class="feature-item">24/7 customer support whenever you need assistance</div>
+        <div class="feature-item">Secure and easy payment options</div>
       </div>
-      <div style="text-align: center;">
-        <a href="${this.websiteUrl}" class="cta-button">Start Playing Now</a>
-      </div>
-      <p class="sub-message">Explore our games, make your first deposit,<br>and enjoy exclusive rewards.</p>
+
+      <p class="closing-text">Best of luck,</p>
+      <p class="signature">The Belucky Team</p>
     </div>
     <div class="footer">
       <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="footer-link">Visit Belucky Win on Facebook</a>
-      <p class="footer-copy" style="margin-top: 20px;">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="https://www.facebook.com/belucky.win" class="social-link">
+        <img src="${this.facebookLogoUrl}" alt="Facebook" />
+      </a>
+      <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="${this.websiteUrl}/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>
   </div>
 </div>
@@ -242,7 +333,7 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
     const mailOptions = {
       from: sender,
       to: email,
-      subject: 'Welcome to Belucky - Your $3 Bonus Awaits',
+      subject: 'Welcome to Belucky - Your Account is Ready',
       html: htmlContent,
       category: 'Welcome Email'
     };
@@ -279,9 +370,11 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 .sub-message { margin: 0; color: #9ca3af; font-size: 13px; }
 .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
 .footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.footer-link { display: inline-block; color: #1877f2; text-decoration: none; font-weight: 600; font-size: 14px; margin-bottom: 15px; }
-.footer-link:hover { text-decoration: underline; }
-.footer-copy { margin: 0; color: #9ca3af; font-size: 12px; }
+.social-link { display: inline-block; margin: 0 5px 15px 5px; }
+.social-link img { width: 32px; height: 32px; }
+.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
+.unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
+.unsubscribe:hover { text-decoration: underline; }
 @media only screen and (max-width: 600px) {
   .wrapper { padding: 20px 10px; }
   .container { border-radius: 10px; }
@@ -308,8 +401,11 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
     </div>
     <div class="footer">
       <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="footer-link">Visit Belucky Win on Facebook</a>
-      <p class="footer-copy" style="margin-top: 20px;">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="https://www.facebook.com/belucky.win" class="social-link">
+        <img src="${this.facebookLogoUrl}" alt="Facebook" />
+      </a>
+      <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="${this.websiteUrl}/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>
   </div>
 </div>
@@ -358,9 +454,11 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 .promo-button { display: inline-block; background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%); color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 12px; font-weight: 600; font-size: 16px; }
 .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
 .footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.footer-link { display: inline-block; color: #1877f2; text-decoration: none; font-weight: 600; font-size: 14px; margin-bottom: 15px; }
-.footer-link:hover { text-decoration: underline; }
-.footer-copy { margin: 0; color: #9ca3af; font-size: 12px; }
+.social-link { display: inline-block; margin: 0 5px 15px 5px; }
+.social-link img { width: 32px; height: 32px; }
+.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
+.unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
+.unsubscribe:hover { text-decoration: underline; }
 @media only screen and (max-width: 600px) {
   .wrapper { padding: 20px 10px; }
   .container { border-radius: 10px; }
@@ -386,8 +484,11 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
     </div>
     <div class="footer">
       <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="footer-link">Visit Belucky Win on Facebook</a>
-      <p class="footer-copy" style="margin-top: 20px;">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="https://www.facebook.com/belucky.win" class="social-link">
+        <img src="${this.facebookLogoUrl}" alt="Facebook" />
+      </a>
+      <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="${this.websiteUrl}/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>
   </div>
 </div>

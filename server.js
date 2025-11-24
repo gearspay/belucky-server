@@ -32,6 +32,7 @@ const adminSpinRoutes = require('./routes/adminSpinRoutes');
 const referralRoutes = require('./routes/referralRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const cashoutRulesRoutes = require('./routes/CashoutRulesRoutes');
+const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
 
 // ================================
 // IMPORT CRON JOBS
@@ -145,6 +146,7 @@ app.use('/api/admin/spin-wheel', adminSpinRoutes);
 app.use('/api/referral', referralRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/cashout-rules', cashoutRulesRoutes);
+app.use('/api/unsubscribe', unsubscribeRoutes);
 
 // Static files
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
