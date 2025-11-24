@@ -217,7 +217,7 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
         <img src="${this.facebookLogoUrl}" alt="Facebook" />
       </a>
       <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
-      <a href="${this.websiteUrl}/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
+      <a href="${this.websiteUrl}/api/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>
   </div>
 </div>
@@ -320,7 +320,7 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
         <img src="${this.facebookLogoUrl}" alt="Facebook" />
       </a>
       <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
-      <a href="${this.websiteUrl}/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
+      <a href="${this.websiteUrl}/api/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>
   </div>
 </div>
