@@ -1,6 +1,62 @@
 // helpers/depositHelper.js
 const Wallet = require('../models/Wallet');
 const Settings = require('../models/Settings');
+const axios = require('axios');
+
+/**
+ * Send Telegram notification
+ * @param {Object} data - Notification data
+ */
+const sendTelegramNotification = async (data) => {
+    try {
+        const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+        const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+        if (!BOT_TOKEN || !CHAT_ID) {
+            console.warn('⚠️  Telegram credentials not configured in .env');
+            return;
+        }
+
+        const { type, username, email, amount, paymentMethod, transactionId, bonusInfo } = data;
+
+        let message = '';
+
+        if (type === 'deposit_completed') {
+            message = `
+🎉 <b>DEPOSIT COMPLETED</b>
+
+👤 <b>User:</b> ${username}
+
+💰 <b>Amount:</b> $${amount.toFixed(2)}
+💳 <b>Method:</b> ${paymentMethod}
+🆔 <b>Transaction ID:</b> ${transactionId}`;
+
+            if (bonusInfo) {
+                message += `\n\n🎁 <b>BONUS APPLIED:</b>
+📊 <b>Type:</b> ${bonusInfo.type === 'first_deposit' ? 'First Deposit Bonus' : 'Promotional Bonus'}
+💵 <b>Bonus Amount:</b> $${bonusInfo.amount.toFixed(2)}
+📈 <b>Percentage:</b> ${bonusInfo.percentage}%
+📝 <b>Description:</b> ${bonusInfo.description}`;
+            }
+
+            message += `\n\n⏰ <b>Time:</b> ${new Date().toLocaleString('en-US', { timeZone: 'UTC' })} UTC`;
+        }
+
+        const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+        
+        await axios.post(url, {
+            chat_id: CHAT_ID,
+            text: message,
+            parse_mode: 'HTML'
+        });
+
+        console.log('✅ Telegram notification sent successfully');
+
+    } catch (error) {
+        console.error('❌ Error sending Telegram notification:', error.message);
+        // Don't throw error - notification failure shouldn't break deposit
+    }
+};
 
 /**
  * Complete a deposit and apply any applicable bonuses
@@ -228,6 +284,18 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
         console.log('   Bonus Balance:', wallet.bonusBalance);
         console.log('   Available:', wallet.availableBalance);
         console.log('   Pending:', wallet.pendingBalance);
+
+        // ✅ SEND TELEGRAM NOTIFICATION
+        console.log('\n📱 Sending Telegram notification...');
+        await sendTelegramNotification({
+            type: 'deposit_completed',
+            username: wallet.userId.username,
+            email: wallet.userId.email,
+            amount: depositAmount,
+            paymentMethod: transaction.paymentMethod || 'Unknown',
+            transactionId: transaction._id.toString(),
+            bonusInfo: bonusInfo
+        });
 
         console.log('\n✅ Deposit completed successfully');
         console.log('🔧 ═══════════════════════════════════════════════════\n');

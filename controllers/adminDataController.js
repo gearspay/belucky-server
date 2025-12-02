@@ -431,6 +431,131 @@ const getTransactions = async (req, res) => {
 // WITHDRAWAL MANAGEMENT
 // ================================
 
+const updateTelegramToCompleted = async (data) => {
+    try {
+        const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+        const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+        if (!BOT_TOKEN || !CHAT_ID || !data.messageId) {
+            console.warn('⚠️  Cannot update Telegram - missing credentials or message_id');
+            return;
+        }
+
+        const { username, email, amount, fee, netAmount, paymentMethod, transactionId, messageId, txid, details } = data;
+
+        let message = '';
+        
+        // CRYPTO: Automatically sent through gateway
+        if (paymentMethod === 'crypto') {
+            message = `
+✅ <b>WITHDRAWAL COMPLETED</b>
+
+👤 <b>User:</b> ${username}
+💰 <b>Amount:</b> $${amount.toFixed(2)}
+💸 <b>Fee:</b> $${fee.toFixed(2)}
+💵 <b>Net:</b> $${netAmount.toFixed(2)}
+💳 <b>Method:</b> CRYPTO
+🆔 <b>ID:</b> <code>${transactionId}</code>`;
+
+            if (details?.cryptoType) {
+                message += `\n\n🪙 <b>Type:</b> ${details.cryptoType}`;
+            }
+            if (details?.withdrawalAddress) {
+                message += `\n📍 <b>Address:</b> <code>${details.withdrawalAddress}</code>`;
+            }
+            if (txid) {
+                message += `\n\n🔗 <b>TX Hash:</b>\n<code>${txid}</code>`;
+            }
+            
+            message += `\n\n✅ <b>Status:</b> COMPLETED & SENT
+⏰ ${new Date().toLocaleString('en-US', { timeZone: 'UTC' })} UTC`;
+        } 
+        // CASHAPP/CHIME: Approved but requires manual payment
+        else {
+            message = `
+✅ <b>WITHDRAWAL APPROVED</b>
+
+👤 <b>User:</b> ${username}
+💰 <b>Amount:</b> $${amount.toFixed(2)}
+💸 <b>Fee:</b> $${fee.toFixed(2)}
+💵 <b>Send Amount:</b> $${netAmount.toFixed(2)}
+💳 <b>Method:</b> ${paymentMethod.toUpperCase()}
+🆔 <b>ID:</b> <code>${transactionId}</code>`;
+
+            if (paymentMethod === 'cashapp' && details?.cashappTag) {
+                message += `\n\n💳 <b>CashApp Payment:</b>
+🏷️ <b>Send to:</b> ${details.cashappTag}`;
+                if (details.cashappName) {
+                    message += `\n👤 <b>Name:</b> ${details.cashappName}`;
+                }
+            } else if (paymentMethod === 'chime' && details?.chimeTag) {
+                message += `\n\n💳 <b>Chime Payment:</b>
+🏷️ <b>Send to:</b> ${details.chimeTag}
+👤 <b>Name:</b> ${details.chimeName}`;
+            }
+            
+            message += `\n\n✅ <b>Status:</b> APPROVED - Send $${netAmount.toFixed(2)} via ${paymentMethod.toUpperCase()}
+⏰ ${new Date().toLocaleString('en-US', { timeZone: 'UTC' })} UTC`;
+        }
+
+        const url = `https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`;
+        
+        await axios.post(url, {
+            chat_id: CHAT_ID,
+            message_id: messageId,
+            text: message,
+            parse_mode: 'HTML'
+        });
+
+        console.log('✅ Telegram message updated to COMPLETED');
+
+    } catch (error) {
+        console.error('❌ Error updating Telegram to completed:', error.message);
+    }
+};
+
+/**
+ * Update Telegram message to show withdrawal rejected
+ */
+const updateTelegramToRejected = async (data) => {
+    try {
+        const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+        const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+        if (!BOT_TOKEN || !CHAT_ID || !data.messageId) {
+            console.warn('⚠️  Cannot update Telegram - missing credentials or message_id');
+            return;
+        }
+
+        const { username, email, amount, paymentMethod, transactionId, messageId, reason } = data;
+
+        const message = `
+❌ <b>WITHDRAWAL REJECTED</b>
+
+👤 <b>User:</b> ${username}
+💰 <b>Amount:</b> $${amount.toFixed(2)}
+💳 <b>Method:</b> ${paymentMethod.toUpperCase()}
+🆔 <b>ID:</b> <code>${transactionId}</code>
+
+${reason ? `📝 <b>Reason:</b> ${reason}\n\n` : ''}❌ <b>Status:</b> REJECTED - Amount Refunded
+⏰ ${new Date().toLocaleString('en-US', { timeZone: 'UTC' })} UTC`;
+
+        const url = `https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`;
+        
+        await axios.post(url, {
+            chat_id: CHAT_ID,
+            message_id: messageId,
+            text: message,
+            parse_mode: 'HTML'
+        });
+
+        console.log('✅ Telegram message updated to REJECTED');
+
+    } catch (error) {
+        console.error('❌ Error updating Telegram to rejected:', error.message);
+    }
+};
+
 const approveWithdrawal = async (req, res) => {
     try {
         const { walletId, transactionId } = req.body;
@@ -495,8 +620,13 @@ const approveWithdrawal = async (req, res) => {
     }
 };
 
+// Replace processCryptoWithdrawalAdmin in adminDataController.js
+
 const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
     try {
+        // ✅ SAVE MESSAGE ID BEFORE PROCESSING (transaction object might change)
+        const telegramMessageId = transaction.telegramMessageId;
+        
         // Get crypto config
         const cryptoConfig = await PaymentMethod.getConfig('crypto');
         if (!cryptoConfig || !cryptoConfig.gatewayUrl || !cryptoConfig.username || !cryptoConfig.password) {
@@ -536,7 +666,28 @@ const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
         console.log('   TX Hash:', withdrawalResult.transaction_hash);
 
         // Reload wallet to get updated state
-        const updatedWallet = await Wallet.findById(wallet._id);
+        const updatedWallet = await Wallet.findById(wallet._id).populate('userId', 'username email');
+        
+        // ✅ UPDATE TELEGRAM MESSAGE TO COMPLETED
+        console.log('\n📱 Updating Telegram message to COMPLETED...');
+        console.log(`   Using message_id: ${telegramMessageId}`);
+        
+        await updateTelegramToCompleted({
+            username: updatedWallet.userId.username,
+            email: updatedWallet.userId.email,
+            amount: transaction.amount,
+            fee: transaction.fee || 0,
+            netAmount: transaction.netAmount || transaction.amount,
+            paymentMethod: 'crypto',
+            transactionId: transaction._id.toString(),
+            messageId: telegramMessageId, // ✅ Use saved message_id from before
+            txid: withdrawalResult.transaction_hash || withdrawalResult.task_id,
+            details: {
+                cryptoType: cryptoType,
+                withdrawalAddress: withdrawalAddress,
+                cryptoAmount: finalCryptoAmount
+            }
+        });
         
         res.json({
             success: true,
@@ -559,20 +710,13 @@ const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
         console.error('   Error message:', error.message);
         console.error('   Error response:', error.response?.data);
 
-        // ✅ CRITICAL FIX: Do NOT manually adjust balances here
-        // Let updateWalletTransactionStatus handle everything
-        
-        // Just mark transaction as failed - the helper function will handle refund
         try {
-            // Get fresh wallet state before update
             const freshWallet = await Wallet.findById(wallet._id);
             const freshTransaction = freshWallet.transactions.id(transaction._id);
             
-            // Only update if still pending (prevent double processing)
             if (freshTransaction && freshTransaction.status === 'pending') {
                 console.log('🔄 Marking transaction as failed and triggering refund...');
                 
-                // ✅ This will handle the refund properly - no manual balance adjustments needed
                 const { updateWalletTransactionStatus } = require('./paymentController');
                 await updateWalletTransactionStatus(transaction._id, 'failed', {
                     error: error.message,
@@ -598,8 +742,22 @@ const processCryptoWithdrawalAdmin = async (wallet, transaction, req, res) => {
     }
 };
 
+// Replace approveManualWithdrawal in adminDataController.js
+
 const approveManualWithdrawal = async (wallet, transaction, res) => {
     try {
+        // ✅ SAVE MESSAGE ID AND DETAILS BEFORE UPDATING (in case objects change)
+        const telegramMessageId = transaction.telegramMessageId;
+        const transactionAmount = transaction.amount;
+        const transactionFee = transaction.fee || 0;
+        const transactionNetAmount = transaction.netAmount || transaction.amount;
+        const transactionPaymentMethod = transaction.paymentMethod;
+        const transactionId = transaction._id.toString();
+        const cashappTag = transaction.cashappTag;
+        const cashappName = transaction.cashappName;
+        const chimeTag = transaction.chimeTag;
+        const chimeName = transaction.chimeFullName;
+        
         wallet.pendingBalance = Math.max(0, wallet.pendingBalance - transaction.amount);
         wallet.balance = Math.max(0, wallet.balance - transaction.amount);
         wallet.updateAvailableBalance();
@@ -609,15 +767,39 @@ const approveManualWithdrawal = async (wallet, transaction, res) => {
         transaction.description = `${transaction.paymentMethod} withdrawal - Completed (Manual payment confirmed)`;
 
         await wallet.save();
+        
+        // Reload wallet with user info for notification
+        const updatedWallet = await Wallet.findById(wallet._id).populate('userId', 'username email');
+
+        // ✅ UPDATE TELEGRAM MESSAGE TO COMPLETED
+        console.log('\n📱 Updating Telegram message to APPROVED...');
+        console.log(`   Using message_id: ${telegramMessageId}`);
+        
+        await updateTelegramToCompleted({
+            username: updatedWallet.userId.username,
+            email: updatedWallet.userId.email,
+            amount: transactionAmount,
+            fee: transactionFee,
+            netAmount: transactionNetAmount,
+            paymentMethod: transactionPaymentMethod,
+            transactionId: transactionId,
+            messageId: telegramMessageId, // ✅ Use saved message_id from before
+            details: {
+                cashappTag: cashappTag,
+                cashappName: cashappName,
+                chimeTag: chimeTag,
+                chimeName: chimeName
+            }
+        });
 
         res.json({
             success: true,
-            message: `${transaction.paymentMethod} withdrawal approved successfully`,
+            message: `${transactionPaymentMethod} withdrawal approved successfully`,
             data: {
-                transactionId: transaction._id,
-                amount: transaction.amount,
-                status: transaction.status,
-                paymentMethod: transaction.paymentMethod,
+                transactionId: transactionId,
+                amount: transactionAmount,
+                status: 'completed',
+                paymentMethod: transactionPaymentMethod,
                 newPendingBalance: wallet.pendingBalance,
                 newAvailableBalance: wallet.availableBalance
             }
@@ -628,6 +810,8 @@ const approveManualWithdrawal = async (wallet, transaction, res) => {
         throw error;
     }
 };
+
+// Replace rejectWithdrawal in adminDataController.js
 
 const rejectWithdrawal = async (req, res) => {
     try {
@@ -640,7 +824,7 @@ const rejectWithdrawal = async (req, res) => {
             });
         }
 
-        const wallet = await Wallet.findById(walletId);
+        const wallet = await Wallet.findById(walletId).populate('userId', 'username email');
         if (!wallet) {
             return res.status(404).json({
                 success: false,
@@ -670,6 +854,12 @@ const rejectWithdrawal = async (req, res) => {
             });
         }
 
+        // ✅ SAVE MESSAGE ID AND DETAILS BEFORE UPDATING
+        const telegramMessageId = transaction.telegramMessageId;
+        const transactionAmount = transaction.amount;
+        const transactionPaymentMethod = transaction.paymentMethod || 'Unknown';
+        const transactionIdString = transaction._id.toString();
+
         wallet.pendingBalance = Math.max(0, wallet.pendingBalance - transaction.amount);
         wallet.updateAvailableBalance();
 
@@ -679,12 +869,26 @@ const rejectWithdrawal = async (req, res) => {
 
         await wallet.save();
 
+        // ✅ UPDATE TELEGRAM MESSAGE TO REJECTED
+        console.log('\n📱 Updating Telegram message to REJECTED...');
+        console.log(`   Using message_id: ${telegramMessageId}`);
+        
+        await updateTelegramToRejected({
+            username: wallet.userId.username,
+            email: wallet.userId.email,
+            amount: transactionAmount,
+            paymentMethod: transactionPaymentMethod,
+            transactionId: transactionIdString,
+            messageId: telegramMessageId, // ✅ Use saved message_id from before
+            reason: reason || 'No reason provided'
+        });
+
         res.json({
             success: true,
             message: 'Withdrawal rejected and amount refunded to user',
             data: {
-                transactionId: transaction._id,
-                refundedAmount: transaction.amount,
+                transactionId: transactionIdString,
+                refundedAmount: transactionAmount,
                 newBalance: wallet.balance,
                 newPendingBalance: wallet.pendingBalance,
                 newAvailableBalance: wallet.availableBalance

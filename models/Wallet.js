@@ -36,6 +36,11 @@ const transactionSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Transaction'
     },
+    // ✅ NEW: Store Telegram message ID for withdrawal notifications
+    telegramMessageId: {
+        type: Number,
+        default: null
+    },
     txid: {
         type: String,
         sparse: true,

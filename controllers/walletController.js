@@ -3,6 +3,7 @@
 const Wallet = require('../models/Wallet');
 const GameAccount = require('../models/GameAccount');
 const PaymentMethod = require('../models/PaymentMethod');
+const axios = require('axios');
 
 // Get user's wallet information
 const getWallet = async (req, res) => {
@@ -228,6 +229,72 @@ const depositFunds = async (req, res) => {
 };
 
 // Withdraw funds - UPDATED WITH DEPOSIT PLAY REQUIREMENT CHECK
+const sendWithdrawalRequestNotification = async (data) => {
+    try {
+        const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+        const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+        if (!BOT_TOKEN || !CHAT_ID) {
+            console.warn('⚠️  Telegram credentials not configured in .env');
+            return null;
+        }
+
+        const { username, email, amount, fee, netAmount, paymentMethod, transactionId, details } = data;
+
+        let message = `
+🔔 <b>NEW WITHDRAWAL REQUEST</b>
+
+👤 <b>User:</b> ${username}
+
+💰 <b>Amount:</b> $${amount.toFixed(2)}
+💸 <b>Fee:</b> $${fee.toFixed(2)}
+💵 <b>Net Amount:</b> $${netAmount.toFixed(2)}
+💳 <b>Method:</b> ${paymentMethod.toUpperCase()}
+🆔 <b>ID:</b> <code>${transactionId}</code>`;
+
+        // Add payment method specific details
+        if (paymentMethod === 'cashapp' && details.cashappTag) {
+            message += `\n\n💳 <b>CashApp Details:</b>
+🏷️ <b>Tag:</b> ${details.cashappTag}`;
+            if (details.cashappName) {
+                message += `\n👤 <b>Name:</b> ${details.cashappName}`;
+            }
+        } else if (paymentMethod === 'chime' && details.chimeTag) {
+            message += `\n\n💳 <b>Chime Details:</b>
+🏷️ <b>Tag:</b> ${details.chimeTag}
+👤 <b>Name:</b> ${details.chimeName}`;
+        } else if (paymentMethod === 'crypto' && details.cryptoType) {
+            message += `\n\n💳 <b>Crypto Details:</b>
+🪙 <b>Type:</b> ${details.cryptoType}
+📍 <b>Address:</b> <code>${details.cryptoAddress}</code>`;
+            if (details.cryptoAmount) {
+                message += `\n💰 <b>Amount:</b> ${details.cryptoAmount}`;
+            }
+        }
+
+        message += `\n\n⏰ <b>Requested:</b> ${new Date().toLocaleString('en-US', { timeZone: 'UTC' })} UTC
+⏳ <b>Status:</b> PENDING APPROVAL`;
+
+        const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+        
+        const response = await axios.post(url, {
+            chat_id: CHAT_ID,
+            text: message,
+            parse_mode: 'HTML'
+        });
+
+        console.log('✅ Telegram withdrawal request notification sent');
+        
+        // Return message_id so we can update this message later
+        return response.data.result.message_id;
+
+    } catch (error) {
+        console.error('❌ Error sending Telegram request notification:', error.message);
+        return null;
+    }
+};
+
+// Withdraw funds - UPDATED WITH TELEGRAM NOTIFICATION
 const withdrawFunds = async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -281,6 +348,9 @@ const withdrawFunds = async (req, res) => {
         
         const wallet = await Wallet.findOrCreateWallet(userId);
         
+        // Populate user info for notification
+        await wallet.populate('userId', 'username email');
+        
         if (wallet.status !== 'active') {
             return res.status(403).json({
                 success: false,
@@ -288,16 +358,15 @@ const withdrawFunds = async (req, res) => {
             });
         }
         
-        // ✅ NEW CHECK: Must play deposit before withdrawal
+        // ✅ CHECK: Must play deposit before withdrawal
         console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         console.log('🔍 CHECKING DEPOSIT PLAY REQUIREMENT');
         
-        // ✅ FIXED: Get last REAL deposit (excluding bonus deposits)
         const lastDeposit = wallet.transactions
             .filter(t => 
                 t.type === 'deposit' && 
                 t.status === 'completed' && 
-                t.isBonus === false  // ✅ Only real deposits, not bonus transactions
+                t.isBonus === false
             )
             .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
         
@@ -305,7 +374,6 @@ const withdrawFunds = async (req, res) => {
             console.log(`   Last Real Deposit: $${lastDeposit.amount} at ${lastDeposit.createdAt}`);
             console.log(`   Is Bonus: ${lastDeposit.isBonus ? 'YES' : 'NO'}`);
             
-            // Get total amount transferred to games AFTER this deposit (both cash and bonus)
             const transferredToGames = wallet.transactions
                 .filter(t => 
                     t.type === 'game_deposit' && 
@@ -317,7 +385,6 @@ const withdrawFunds = async (req, res) => {
             console.log(`   Amount Played in Games: $${transferredToGames}`);
             console.log(`   Deposit Amount: $${lastDeposit.amount}`);
             
-            // Check if deposit amount has been fully played
             if (transferredToGames < lastDeposit.amount) {
                 const remainingToPlay = lastDeposit.amount - transferredToGames;
                 
@@ -418,6 +485,34 @@ const withdrawFunds = async (req, res) => {
         wallet.processWithdrawal(amount);
         
         await wallet.save();
+
+        // ✅ SEND TELEGRAM NOTIFICATION AND SAVE MESSAGE ID
+        console.log('\n📱 Sending Telegram notification for withdrawal...');
+        const telegramMessageId = await sendWithdrawalRequestNotification({
+            username: wallet.userId.username,
+            email: wallet.userId.email,
+            amount: amount,
+            fee: feeAmount,
+            netAmount: netAmount,
+            paymentMethod: paymentMethod,
+            transactionId: transaction._id.toString(),
+            details: {
+                cashappTag,
+                cashappName,
+                chimeTag,
+                chimeName,
+                cryptoType,
+                cryptoAddress,
+                cryptoAmount
+            }
+        });
+
+        // ✅ STORE MESSAGE ID IN TRANSACTION
+        if (telegramMessageId) {
+            transaction.telegramMessageId = telegramMessageId;
+            await wallet.save();
+            console.log(`✅ Telegram message_id ${telegramMessageId} saved to transaction`);
+        }
 
         res.json({
             success: true,
