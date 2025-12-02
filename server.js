@@ -6,6 +6,7 @@ const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const path = require('path');
+const requestIp = require('request-ip'); // ✅ ADD THIS
 
 // Load environment variables
 dotenv.config();
@@ -42,6 +43,12 @@ const unsubscribeRoutes = require('./routes/unsubscribeRoutes');
 const { startChimeVerificationJob } = require('./jobs/chimeVerificationJob');
 
 // ================================
+// TRUST PROXY CONFIGURATION
+// ================================
+// ✅ CRITICAL: Must be set BEFORE any middleware that uses req.ip
+app.set('trust proxy', true);
+
+// ================================
 // SECURITY MIDDLEWARE
 // ================================
 
@@ -49,6 +56,12 @@ app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
+
+// ================================
+// IP DETECTION MIDDLEWARE
+// ================================
+// ✅ ADD THIS - Must come early in middleware chain
+app.use(requestIp.mw());
 
 // ================================
 // DYNAMIC CORS CONFIGURATION
@@ -88,12 +101,13 @@ app.use((req, res, next) => {
 //   message: {
 //     success: false,
 //     message: 'Too many requests from this IP, please try again later.'
-//   }
+//   },
+//   standardHeaders: true,
+//   legacyHeaders: false,
 // });
 // app.use(limiter);
 
-// TODO: Re-enable rate limiting after fixing configuration for ngrok/proxy
-// Add this when re-enabling: app.set('trust proxy', 1);
+// TODO: Re-enable rate limiting after testing
 
 // ================================
 // BODY PARSING MIDDLEWARE
@@ -102,6 +116,27 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser());
+
+// ================================
+// IP LOGGING MIDDLEWARE (OPTIONAL - FOR DEBUGGING)
+// ================================
+app.use((req, res, next) => {
+  // Clean up IPv6 localhost
+  let ip = req.clientIp || req.ip || 'unknown';
+  if (ip === '::1' || ip === '::ffff:127.0.0.1') {
+    ip = '127.0.0.1';
+  }
+  if (ip.startsWith('::ffff:')) {
+    ip = ip.substring(7);
+  }
+  
+  // Log requests (comment out in production if too verbose)
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`${req.method} ${req.path} from ${ip}`);
+  }
+  
+  next();
+});
 
 // ================================
 // DATABASE CONNECTION
@@ -126,11 +161,16 @@ const connectDB = async () => {
 connectDB();
 
 // ================================
-// API ROUTES - ✅ UNIQUE BONUS ROUTE
+// API ROUTES
 // ================================
 
 app.post('/api/test-post', (req, res) => {
-  res.json({ success: true, message: 'POST request working', body: req.body });
+  res.json({ 
+    success: true, 
+    message: 'POST request working', 
+    body: req.body,
+    ip: req.clientIp || req.ip // ✅ Test IP detection
+  });
 });
 
 app.use('/api/auth', authRoutes);
@@ -138,15 +178,11 @@ app.use('/api/user', userRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/wallet', walletRoutes);
-
-// ✅ COMPLETELY UNIQUE ROUTE PATH - No conflicts!
 app.use('/api/bonus-settings', adminSettingsRoutes);
-
 app.use('/api/admin/spin-wheel', adminSpinRoutes);
 app.use('/api/admin-data', adminDataRoutes);
 app.use('/api/admin', adminAuthRoutes);
 app.use('/api/admin', gameAdminRoutes);
-
 app.use('/api/public', publicRoutes);
 app.use('/api/spin-wheel', spinWheelRoutes);
 app.use('/api/referral', referralRoutes);
@@ -162,11 +198,25 @@ app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 // ================================
 
 app.get('/health', (req, res) => {
+  let ip = req.clientIp || req.ip || 'unknown';
+  if (ip === '::1' || ip === '::ffff:127.0.0.1') {
+    ip = '127.0.0.1';
+  }
+  if (ip.startsWith('::ffff:')) {
+    ip = ip.substring(7);
+  }
+
   res.json({ 
     success: true, 
     message: 'Server is running',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    requestIP: ip, // ✅ Show detected IP
+    headers: {
+      'x-forwarded-for': req.headers['x-forwarded-for'] || null,
+      'x-real-ip': req.headers['x-real-ip'] || null,
+      'cf-connecting-ip': req.headers['cf-connecting-ip'] || null
+    }
   });
 });
 
@@ -245,8 +295,16 @@ app.listen(PORT, () => {
   console.log('║                                                            ║');
   console.log('║  🔐 SECURITY:                                              ║');
   console.log('║     • Helmet.js enabled                                    ║');
+  console.log('║     • IP tracking with request-ip library                  ║');
+  console.log('║     • Trust proxy enabled                                  ║');
   console.log('║     • Rate limiting DISABLED (testing mode)                ║');
   console.log('║     • CORS configured for allowed origins                  ║');
+  console.log('║                                                            ║');
+  console.log('║  🌐 IP DETECTION:                                          ║');
+  console.log('║     • Works with proxies (Nginx, Cloudflare, etc.)         ║');
+  console.log('║     • Tracks signup and login IPs                          ║');
+  console.log('║     • Login history with IP and user agent                 ║');
+  console.log('║     • Test endpoint: GET /health                           ║');
   console.log('║                                                            ║');
   console.log('╚════════════════════════════════════════════════════════════╝');
 });

@@ -6,16 +6,34 @@ const Wallet = require('../models/Wallet');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const emailService = require('../services/emailService');
-const Settings = require('../models/Settings'); // Add this import at top
-
+const Settings = require('../models/Settings');
 
 // ========================================
-// NEW: SEND OTP FOR EMAIL VERIFICATION
+// GET CLIENT IP - SIMPLE & RELIABLE
+// ========================================
+const getClientIP = (req) => {
+  // request-ip middleware adds clientIp to req
+  let ip = req.clientIp || req.ip || 'unknown';
+  
+  // Clean up IPv6 localhost
+  if (ip === '::1' || ip === '::ffff:127.0.0.1') {
+    ip = '127.0.0.1';
+  }
+  
+  // Remove IPv6 prefix if present
+  if (ip.startsWith('::ffff:')) {
+    ip = ip.substring(7);
+  }
+  
+  return ip;
+};
+
+// ========================================
+// SEND OTP FOR EMAIL VERIFICATION
 // ========================================
 const sendOTP = async (req, res) => {
   const { email, purpose = 'registration', referralCode } = req.body;
 
-  // Validate email
   if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
     return res.status(400).json({
       success: false,
@@ -24,9 +42,9 @@ const sendOTP = async (req, res) => {
   }
 
   const lowercaseEmail = email.toLowerCase().trim();
+  const clientIP = getClientIP(req); // ✅ USES REQUEST-IP
 
   try {
-    // Check if email already exists in database (for registration)
     if (purpose === 'registration') {
       const existingUser = await User.findOne({ 'profile.email': lowercaseEmail });
       if (existingUser) {
@@ -37,7 +55,6 @@ const sendOTP = async (req, res) => {
       }
     }
 
-    // Rate limiting: Check how many OTPs sent in last minute
     const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
     const recentOTPs = await OTP.countDocuments({
       email: lowercaseEmail,
@@ -53,33 +70,28 @@ const sendOTP = async (req, res) => {
       });
     }
 
-    // Clean up old unverified OTPs for this email
     await OTP.cleanupOldOTPs(lowercaseEmail, purpose);
 
-    // Generate new OTP
     const otpCode = OTP.generateOTP();
     const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 10;
     const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
 
-    // Save OTP to database
     const newOTP = await OTP.create({
       email: lowercaseEmail,
       otp: otpCode,
       purpose,
       expiresAt,
       metadata: {
-        ipAddress: req.ip,
+        ipAddress: clientIP, // ✅ SAVES IP
         userAgent: req.get('User-Agent'),
         referralCode: referralCode || null
       }
     });
 
-    // Send OTP via email
     try {
       await emailService.sendOTP(lowercaseEmail, otpCode, purpose);
     } catch (emailError) {
       console.error('Error sending OTP email:', emailError);
-      // Delete the OTP if email fails
       await OTP.findByIdAndDelete(newOTP._id);
       
       return res.status(500).json({
@@ -109,12 +121,11 @@ const sendOTP = async (req, res) => {
 };
 
 // ========================================
-// NEW: VERIFY OTP
+// VERIFY OTP
 // ========================================
 const verifyOTP = async (req, res) => {
   const { email, otp, purpose = 'registration' } = req.body;
 
-  // Validate inputs
   if (!email || !otp) {
     return res.status(400).json({
       success: false,
@@ -125,7 +136,6 @@ const verifyOTP = async (req, res) => {
   const lowercaseEmail = email.toLowerCase().trim();
 
   try {
-    // Find the latest unverified OTP for this email and purpose
     const otpRecord = await OTP.findOne({
       email: lowercaseEmail,
       purpose,
@@ -139,7 +149,6 @@ const verifyOTP = async (req, res) => {
       });
     }
 
-    // Check if OTP is expired
     if (otpRecord.isExpired()) {
       return res.status(400).json({
         success: false,
@@ -147,7 +156,6 @@ const verifyOTP = async (req, res) => {
       });
     }
 
-    // Check if max attempts exceeded
     if (otpRecord.hasExceededAttempts()) {
       return res.status(400).json({
         success: false,
@@ -155,11 +163,9 @@ const verifyOTP = async (req, res) => {
       });
     }
 
-    // Increment attempts
     otpRecord.attempts += 1;
     await otpRecord.save();
 
-    // Verify OTP
     if (otpRecord.otp !== otp) {
       const remainingAttempts = otpRecord.maxAttempts - otpRecord.attempts;
       return res.status(400).json({
@@ -168,7 +174,6 @@ const verifyOTP = async (req, res) => {
       });
     }
 
-    // Mark OTP as verified
     otpRecord.verified = true;
     await otpRecord.save();
 
@@ -193,16 +198,12 @@ const verifyOTP = async (req, res) => {
 };
 
 // ========================================
-// UPDATED: REGISTER (NOW REQUIRES VERIFIED EMAIL)
+// REGISTER WITH IP TRACKING
 // ========================================
-// Updated register function in authController.js - Replace the existing register function
-
-
 const register = async (req, res) => {
   const role = 2;
   const { username, password, email, affiliateUsername } = req.body;
 
-  // Validate input
   if (!username || !password || !email) {
     return res.status(400).json({ 
       success: false,
@@ -210,7 +211,6 @@ const register = async (req, res) => {
     });
   }
 
-  // Username validation
   if (username.length < 3 || username.length > 20) {
     return res.status(400).json({ 
       success: false,
@@ -218,7 +218,6 @@ const register = async (req, res) => {
     });
   }
 
-  // Password validation
   if (password.length < 6) {
     return res.status(400).json({ 
       success: false,
@@ -227,9 +226,11 @@ const register = async (req, res) => {
   }
 
   const lowercaseEmail = email.toLowerCase().trim();
+  const clientIP = getClientIP(req); // ✅ GETS REAL IP
+
+  console.log(`📍 Registration from IP: ${clientIP}, User-Agent: ${req.get('User-Agent')}`);
 
   try {
-    // ✅ CHECK IF EMAIL IS VERIFIED
     const verifiedOTP = await OTP.findOne({
       email: lowercaseEmail,
       purpose: 'registration',
@@ -243,7 +244,6 @@ const register = async (req, res) => {
       });
     }
 
-    // Check if OTP verification is recent (within 30 minutes)
     const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
     if (verifiedOTP.createdAt < thirtyMinutesAgo) {
       return res.status(400).json({
@@ -252,7 +252,6 @@ const register = async (req, res) => {
       });
     }
 
-    // Check if username already exists
     const existingUsername = await User.findOne({ username: username.toLowerCase() });
     if (existingUsername) {
       return res.status(409).json({ 
@@ -261,7 +260,6 @@ const register = async (req, res) => {
       });
     }
 
-    // Check if email already exists
     const existingEmail = await User.findOne({ 'profile.email': lowercaseEmail });
     if (existingEmail) {
       return res.status(409).json({ 
@@ -270,10 +268,8 @@ const register = async (req, res) => {
       });
     }
 
-    // Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create a new user instance
     const user = new User({
       username: username.toLowerCase(),
       password: hashedPassword,
@@ -281,13 +277,23 @@ const register = async (req, res) => {
       profile: {
         email: lowercaseEmail,
         emailVerified: true
+      },
+      account: {
+        signupIP: clientIP, // ✅ SAVE SIGNUP IP
+        lastLoginIP: clientIP,
+        lastLogin: new Date(),
+        loginHistory: [{
+          ip: clientIP,
+          userAgent: req.get('User-Agent'),
+          timestamp: new Date()
+        }]
       }
     });
 
-    // Save the new user to the database
     const newUser = await user.save();
 
-    // ✅ GET SIGNUP BONUS FROM SETTINGS (NOT HARDCODED)
+    console.log(`✅ User registered: ${username} from IP: ${clientIP}`);
+
     let signupBonusAmount = 0;
     try {
       const settings = await Settings.getSettings();
@@ -296,10 +302,9 @@ const register = async (req, res) => {
       }
     } catch (settingsError) {
       console.error('Error fetching signup bonus settings:', settingsError);
-      signupBonusAmount = 3; // Fallback to $3 if settings fail
+      signupBonusAmount = 3;
     }
 
-    // ✅ AWARD SIGNUP BONUS (DYNAMIC FROM SETTINGS)
     if (signupBonusAmount > 0) {
       try {
         const newUserWallet = await Wallet.findOrCreateWallet(newUser._id);
@@ -311,7 +316,8 @@ const register = async (req, res) => {
           isBonus: true,
           metadata: {
             source: 'signup_bonus',
-            rewardType: 'welcome_bonus'
+            rewardType: 'welcome_bonus',
+            signupIP: clientIP
           }
         });
         await newUserWallet.save();
@@ -321,7 +327,6 @@ const register = async (req, res) => {
       }
     }
 
-    // Handle referral code if provided
     let referralApplied = false;
     let referralCode = affiliateUsername || verifiedOTP.metadata?.referralCode;
     
@@ -362,7 +367,7 @@ const register = async (req, res) => {
                 maxRewardDeposits: 5
               },
               metadata: {
-                referredUserIP: req.ip,
+                referredUserIP: clientIP,
                 referredUserAgent: req.get('User-Agent'),
                 referralSource: 'registration',
                 depositCount: 0,
@@ -379,15 +384,12 @@ const register = async (req, res) => {
       }
     }
 
-    // Delete used OTP
     await OTP.findByIdAndDelete(verifiedOTP._id);
 
-    // Send welcome email (non-blocking)
     emailService.sendWelcomeEmail(lowercaseEmail, username).catch(err => {
       console.error('Error sending welcome email:', err);
     });
 
-    // Don't send password back in response
     const userResponse = {
       _id: newUser._id,
       username: newUser.username,
@@ -431,7 +433,7 @@ const register = async (req, res) => {
 };
 
 // ========================================
-// LOGIN (NO CHANGES NEEDED)
+// LOGIN WITH IP TRACKING
 // ========================================
 const login = async (req, res) => {
   const { username, password } = req.body;
@@ -442,6 +444,10 @@ const login = async (req, res) => {
       message: 'Username and password are required' 
     });
   }
+
+  const clientIP = getClientIP(req); // ✅ GETS REAL IP
+
+  console.log(`📍 Login attempt: ${username} from IP: ${clientIP}`);
 
   try {
     const lowercaseUsername = username.toLowerCase();
@@ -482,9 +488,13 @@ const login = async (req, res) => {
       { expiresIn: '24h' }
     );
 
-    await User.findByIdAndUpdate(user._id, {
-      'account.lastLogin': new Date()
-    });
+    // ✅ UPDATE LOGIN IP AND HISTORY
+    user.account.lastLogin = new Date();
+    user.account.lastLoginIP = clientIP;
+    user.addLoginHistory(clientIP, req.get('User-Agent'));
+    await user.save();
+
+    console.log(`✅ Login successful: ${username} from IP: ${clientIP}`);
 
     res.status(200).json({
       success: true,
@@ -519,7 +529,57 @@ const login = async (req, res) => {
   }
 };
 
-// Other existing functions remain the same
+// ========================================
+// GET CURRENT USER
+// ========================================
+const getCurrentUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select('-password').lean();
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'User data retrieved successfully',
+      data: {
+        user: {
+          _id: user._id,
+          username: user.username,
+          role: user.role,
+          profile: {
+            firstName: user.profile?.firstName || null,
+            lastName: user.profile?.lastName || null,
+            email: user.profile?.email || null,
+            emailVerified: user.profile?.emailVerified || false,
+            phone: user.profile?.phone || null,
+            avatar: user.profile?.avatar || null
+          },
+          wallet: user.wallet,
+          account: user.account,
+          createdAt: user.createdAt,
+          updatedAt: user.updatedAt,
+          affiliateId: user.affiliateId,
+          pin: user.pin
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error getting current user:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error retrieving user data',
+      error: error.message
+    });
+  }
+};
+
+// Keep your existing changePassword, changePin, updateProfile functions...
+
 const changePassword = async (req, res) => {
   const userId = req.user.userId;
   const { currentPassword, newPassword } = req.body;
@@ -622,52 +682,6 @@ const changePin = async (req, res) => {
   }
 };
 
-const getCurrentUser = async (req, res) => {
-  try {
-    const user = await User.findById(req.user.userId).select('-password').lean();
-    
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      message: 'User data retrieved successfully',
-      data: {
-        user: {
-          _id: user._id,
-          username: user.username,
-          role: user.role,
-          profile: {
-            firstName: user.profile?.firstName || null,
-            lastName: user.profile?.lastName || null,
-            email: user.profile?.email || null,
-            emailVerified: user.profile?.emailVerified || false,
-            phone: user.profile?.phone || null,
-            avatar: user.profile?.avatar || null
-          },
-          wallet: user.wallet,
-          account: user.account,
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt,
-          affiliateId: user.affiliateId,
-          pin: user.pin
-        }
-      }
-    });
-  } catch (error) {
-    console.error('Error getting current user:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error retrieving user data',
-      error: error.message
-    });
-  }
-};
-
 const updateProfile = async (req, res) => {
   const userId = req.user.userId;
   const { username, firstName, lastName, email, phone } = req.body;
@@ -763,9 +777,9 @@ const updateProfile = async (req, res) => {
 };
 
 module.exports = {
-  sendOTP,        // ✅ NEW
-  verifyOTP,      // ✅ NEW
-  register,       // ✅ UPDATED
+  sendOTP,
+  verifyOTP,
+  register,
   login,
   changePassword,
   changePin,

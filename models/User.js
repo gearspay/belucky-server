@@ -43,15 +43,15 @@ const userSchema = new mongoose.Schema({
     },
     email: {
       type: String,
-      required: [true, 'Email is required'], // ✅ NOW MANDATORY
-      unique: true, // ✅ PREVENT DUPLICATE EMAILS
+      required: [true, 'Email is required'],
+      unique: true,
       lowercase: true,
       trim: true,
       match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email address']
     },
     emailVerified: {
       type: Boolean,
-      default: false // ✅ TRACK EMAIL VERIFICATION STATUS
+      default: false
     },
     phone: {
       type: String,
@@ -85,10 +85,27 @@ const userSchema = new mongoose.Schema({
       type: Date,
       default: null
     },
+    lastLoginIP: {
+      type: String,
+      default: null
+    },
+    signupIP: {
+      type: String,
+      default: null
+    },
     createdAt: {
       type: Date,
       default: Date.now
-    }
+    },
+    // ✅ NEW: Login history tracking (optional, stores last 10 logins)
+    loginHistory: [{
+      ip: String,
+      userAgent: String,
+      timestamp: {
+        type: Date,
+        default: Date.now
+      }
+    }]
   }
 }, {
   timestamps: true
@@ -96,9 +113,30 @@ const userSchema = new mongoose.Schema({
 
 // Indexes for performance
 userSchema.index({ username: 1 });
-userSchema.index({ 'profile.email': 1 }); // ✅ INDEX FOR EMAIL LOOKUPS
+userSchema.index({ 'profile.email': 1 });
 userSchema.index({ affiliateId: 1 });
 userSchema.index({ 'account.isActive': 1 });
+userSchema.index({ 'account.signupIP': 1 }); // ✅ NEW: Index for IP lookup
+userSchema.index({ 'account.lastLoginIP': 1 }); // ✅ NEW: Index for IP lookup
+
+// ✅ NEW: Method to add login history
+userSchema.methods.addLoginHistory = function(ip, userAgent) {
+  if (!this.account.loginHistory) {
+    this.account.loginHistory = [];
+  }
+  
+  // Add new login record
+  this.account.loginHistory.unshift({
+    ip,
+    userAgent,
+    timestamp: new Date()
+  });
+  
+  // Keep only last 10 login records
+  if (this.account.loginHistory.length > 10) {
+    this.account.loginHistory = this.account.loginHistory.slice(0, 10);
+  }
+};
 
 // Transform output (remove sensitive data)
 userSchema.methods.toJSON = function() {

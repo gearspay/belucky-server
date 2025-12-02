@@ -767,20 +767,23 @@ const getTransactionDetails = async (req, res) => {
 
 // ================================
 // USERS MANAGEMENT
-// ================================
+// =================================
 
 const getUsers = async (req, res) => {
     try {
         const { page = 1, limit = 20, search, status } = req.query;
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        // Build query
+        // ✅ BUILD QUERY WITH IP SEARCH SUPPORT
         let query = {};
         
         if (search) {
             query.$or = [
                 { username: { $regex: search, $options: 'i' } },
-                { email: { $regex: search, $options: 'i' } }
+                { email: { $regex: search, $options: 'i' } },
+                { 'profile.email': { $regex: search, $options: 'i' } }, // ✅ Added
+                { 'account.signupIP': { $regex: search, $options: 'i' } }, // ✅ Added
+                { 'account.lastLoginIP': { $regex: search, $options: 'i' } } // ✅ Added
             ];
         }
         
@@ -792,9 +795,9 @@ const getUsers = async (req, res) => {
             }
         }
 
-        // Fetch users with wallet data
+        // ✅ FETCH USERS WITH ACCOUNT FIELDS (INCLUDING IP DATA)
         const users = await User.find(query)
-            .select('username email createdAt account profile')
+            .select('username email createdAt account profile') // ✅ Include account field
             .skip(skip)
             .limit(parseInt(limit))
             .sort({ createdAt: -1 })
@@ -807,9 +810,13 @@ const getUsers = async (req, res) => {
                 return {
                     ...user,
                     wallet: wallet ? {
-                        balance: wallet.balance || 0
+                        balance: wallet.balance || 0,
+                        availableBalance: wallet.availableBalance || 0,
+                        pendingBalance: wallet.pendingBalance || 0
                     } : {
-                        balance: 0
+                        balance: 0,
+                        availableBalance: 0,
+                        pendingBalance: 0
                     }
                 };
             })
