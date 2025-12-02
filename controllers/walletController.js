@@ -227,7 +227,7 @@ const depositFunds = async (req, res) => {
     }
 };
 
-// Withdraw funds
+// Withdraw funds - UPDATED WITH DEPOSIT PLAY REQUIREMENT CHECK
 const withdrawFunds = async (req, res) => {
     try {
         const userId = req.user.userId;
@@ -288,6 +288,70 @@ const withdrawFunds = async (req, res) => {
             });
         }
         
+        // ✅ NEW CHECK: Must play deposit before withdrawal
+        console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🔍 CHECKING DEPOSIT PLAY REQUIREMENT');
+        
+        // ✅ FIXED: Get last REAL deposit (excluding bonus deposits)
+        const lastDeposit = wallet.transactions
+            .filter(t => 
+                t.type === 'deposit' && 
+                t.status === 'completed' && 
+                t.isBonus === false  // ✅ Only real deposits, not bonus transactions
+            )
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))[0];
+        
+        if (lastDeposit) {
+            console.log(`   Last Real Deposit: $${lastDeposit.amount} at ${lastDeposit.createdAt}`);
+            console.log(`   Is Bonus: ${lastDeposit.isBonus ? 'YES' : 'NO'}`);
+            
+            // Get total amount transferred to games AFTER this deposit (both cash and bonus)
+            const transferredToGames = wallet.transactions
+                .filter(t => 
+                    t.type === 'game_deposit' && 
+                    t.status === 'completed' &&
+                    new Date(t.createdAt) >= new Date(lastDeposit.createdAt)
+                )
+                .reduce((sum, t) => sum + t.amount, 0);
+            
+            console.log(`   Amount Played in Games: $${transferredToGames}`);
+            console.log(`   Deposit Amount: $${lastDeposit.amount}`);
+            
+            // Check if deposit amount has been fully played
+            if (transferredToGames < lastDeposit.amount) {
+                const remainingToPlay = lastDeposit.amount - transferredToGames;
+                
+                console.log(`   ❌ INSUFFICIENT PLAY - Need $${remainingToPlay} more`);
+                console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+                
+                return res.status(400).json({
+                    success: false,
+                    message: `You must play your deposit ($${lastDeposit.amount.toFixed(2)}) in games before withdrawing. You've played $${transferredToGames.toFixed(2)} so far. Play $${remainingToPlay.toFixed(2)} more to unlock withdrawals.`,
+                    data: {
+                        depositAmount: lastDeposit.amount,
+                        playedAmount: transferredToGames,
+                        remainingToPlay: remainingToPlay,
+                        depositDate: lastDeposit.createdAt,
+                        requirementMet: false
+                    }
+                });
+            }
+            
+            console.log(`   ✅ REQUIREMENT MET - Deposit has been played`);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        } else {
+            console.log('   ℹ️  No real deposit found - allowing withdrawal');
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+        }
+        
+        // ✅ CHECK: Cannot withdraw bonus balance directly
+        if (amount > wallet.availableBalance) {
+            return res.status(400).json({
+                success: false,
+                message: `Insufficient withdrawable balance. You have $${wallet.availableBalance.toFixed(2)} available for withdrawal. Bonus balance ($${wallet.bonusBalance.toFixed(2)}) can only be used for games.`
+            });
+        }
+        
         let withdrawalFeePercent = 0;
         try {
             const paymentMethodConfig = await PaymentMethod.findOne({ 
@@ -305,13 +369,6 @@ const withdrawFunds = async (req, res) => {
         
         const feeAmount = (amount * withdrawalFeePercent) / 100;
         const netAmount = amount - feeAmount;
-        
-        if (wallet.availableBalance < amount) {
-            return res.status(400).json({
-                success: false,
-                message: `Insufficient available balance. You have ${wallet.availableBalance.toFixed(2)} available`
-            });
-        }
         
         const canWithdraw = wallet.canWithdraw(amount);
         

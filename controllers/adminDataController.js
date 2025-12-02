@@ -2,9 +2,11 @@
 const User = require('../models/User');
 const Wallet = require('../models/Wallet');
 const Game = require('../models/Game');
+const Settings = require('../models/Settings');
 const PaymentMethod = require('../models/PaymentMethod');
 const GameAccount = require('../models/GameAccount');
 const axios = require('axios');
+const { completeDepositWithBonus } = require('../helpers/depositHelper');
 // ================================
 // HELPER FUNCTIONS
 // ================================
@@ -34,9 +36,6 @@ const getTimeAgo = (date) => {
 // ENHANCED DASHBOARD STATS WITH RECENT DATA
 // ================================
 
-// At the top of adminDataController.js, add this import
-
-// Update the getStats function
 const getStats = async (req, res) => {
     try {
         const totalUsers = await User.countDocuments();
@@ -80,11 +79,13 @@ const getStats = async (req, res) => {
                         fee: tx.fee || 0,
                         status: tx.status,
                         paymentMethod: tx.paymentMethod || 'N/A',
+                        isBonus: tx.isBonus || false, // ✅ Add isBonus flag
                         createdAt: tx.createdAt,
                         timeAgo: getTimeAgo(tx.createdAt)
                     });
 
-                    if (tx.type === 'deposit' && tx.status === 'completed') {
+                    // ✅ FIXED: Only count REAL deposits (isBonus === false)
+                    if (tx.type === 'deposit' && tx.status === 'completed' && tx.isBonus === false) {
                         totalDeposits += tx.amount || 0;
                         completedTransactions++;
                     } else if (tx.type === 'withdrawal') {
@@ -108,8 +109,8 @@ const getStats = async (req, res) => {
             success: true,
             data: {
                 totalUsers,
-                activeGames, // ✅ Now counts active game accounts
-                totalDeposits,
+                activeGames,
+                totalDeposits, // ✅ Now only REAL deposits
                 totalWithdrawals,
                 pendingTransactions: pendingWithdrawals,
                 completedTransactions,
@@ -143,7 +144,7 @@ const getChartData = async (req, res) => {
         // Calculate date range
         let start = new Date();
         let end = new Date();
-        let groupBy = 'day'; // day, hour, week, month
+        let groupBy = 'day';
 
         if (period === 'today') {
             start.setHours(0, 0, 0, 0);
@@ -193,8 +194,8 @@ const getChartData = async (req, res) => {
                         dateKey = `${txDate.getFullYear()}-${String(txDate.getMonth() + 1).padStart(2, '0')}`;
                     }
 
-                    // Aggregate data
-                    if (tx.type === 'deposit') {
+                    // ✅ FIXED: Only count REAL deposits (isBonus === false)
+                    if (tx.type === 'deposit' && tx.isBonus === false) {
                         deposits[dateKey] = (deposits[dateKey] || 0) + (tx.amount || 0);
                     } else if (tx.type === 'withdrawal') {
                         withdrawals[dateKey] = (withdrawals[dateKey] || 0) + (tx.amount || 0);
@@ -356,6 +357,9 @@ const getTransactions = async (req, res) => {
                             chimeTag: tx.chimeTag,
                             chimeFullName: tx.chimeFullName,
                             
+                            // ✅ Bonus flag
+                            isBonus: tx.isBonus || false,
+                            
                             paymentRef: tx.paymentRef,
                             riskLevel: riskLevel,
                             timeAgo: getTimeAgo(tx.createdAt),
@@ -371,7 +375,7 @@ const getTransactions = async (req, res) => {
         // Sort by date (most recent first)
         allTransactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
-        // Calculate stats for all transactions (before pagination)
+        // ✅ FIXED: Calculate stats for all transactions (before pagination) - only count REAL deposits
         const stats = {
             totalDeposits: 0,
             totalWithdrawals: 0,
@@ -382,7 +386,8 @@ const getTransactions = async (req, res) => {
 
         allTransactions.forEach(tx => {
             if (tx.status === 'completed') {
-                if (tx.type === 'deposit') {
+                // ✅ FIXED: Only count REAL deposits (isBonus === false)
+                if (tx.type === 'deposit' && tx.isBonus === false) {
                     stats.totalDeposits += tx.netAmount || tx.amount || 0;
                 } else if (tx.type === 'withdrawal') {
                     stats.totalWithdrawals += tx.amount || 0;
@@ -994,7 +999,8 @@ const getWalletStats = async (req, res) => {
 
             if (wallet.transactions && Array.isArray(wallet.transactions)) {
                 wallet.transactions.forEach(tx => {
-                    if (tx.type === 'deposit' && tx.status === 'completed') {
+                    // ✅ FIXED: Only count REAL deposits (isBonus === false)
+                    if (tx.type === 'deposit' && tx.status === 'completed' && tx.isBonus === false) {
                         totalDeposits += tx.amount || 0;
                     } else if (tx.type === 'withdrawal' && tx.status === 'completed') {
                         totalWithdrawals += tx.amount || 0;
@@ -1011,7 +1017,7 @@ const getWalletStats = async (req, res) => {
                 totalPendingBalance,
                 activeWallets,
                 totalWallets: wallets.length,
-                totalDeposits,
+                totalDeposits, // ✅ Now only REAL deposits
                 totalWithdrawals,
                 netRevenue: totalDeposits - totalWithdrawals
             }
@@ -1242,156 +1248,354 @@ const getUserDetails = async (req, res) => {
     }
 };
 
+
 const manualCompleteDeposit = async (req, res) => {
-    console.log('\n🔧 ═══════════════════════════════════════════════════');
-    console.log('🔧 MANUAL DEPOSIT COMPLETION START');
-    console.log('🔧 ═══════════════════════════════════════════════════');
-    
     try {
         const { walletId, transactionId, notes } = req.body;
 
-        console.log('📋 Request Details:');
-        console.log('   Wallet ID:', walletId);
-        console.log('   Transaction ID:', transactionId);
-        console.log('   Admin Notes:', notes || 'None');
-
         // Validation
         if (!walletId || !transactionId) {
-            console.log('❌ Validation failed: Missing required fields');
             return res.status(400).json({
                 success: false,
                 message: 'Wallet ID and Transaction ID are required'
             });
         }
 
-        // Find wallet
-        const wallet = await Wallet.findById(walletId).populate('userId', 'username email');
-        if (!wallet) {
-            console.log('❌ Wallet not found');
-            return res.status(404).json({
-                success: false,
-                message: 'Wallet not found'
-            });
-        }
-
-        // Find transaction
-        const transaction = wallet.transactions.id(transactionId);
-        if (!transaction) {
-            console.log('❌ Transaction not found');
-            return res.status(404).json({
-                success: false,
-                message: 'Transaction not found'
-            });
-        }
-
-        console.log('✅ Found transaction:');
-        console.log('   Type:', transaction.type);
-        console.log('   Amount:', `$${transaction.amount}`);
-        console.log('   Status:', transaction.status);
-        console.log('   Payment Method:', transaction.paymentMethod);
-
-        // Verify it's a deposit
-        if (transaction.type !== 'deposit') {
-            console.log('❌ Not a deposit transaction');
-            return res.status(400).json({
-                success: false,
-                message: 'Only deposit transactions can be manually completed'
-            });
-        }
-
-        // Verify it's pending
-        if (transaction.status !== 'pending') {
-            console.log('❌ Transaction not pending');
-            return res.status(400).json({
-                success: false,
-                message: `Transaction is already ${transaction.status}. Only pending deposits can be manually completed.`
-            });
-        }
-
-        console.log('\n💰 Balance State BEFORE Update:');
-        console.log('   Balance:', wallet.balance);
-        console.log('   Available:', wallet.availableBalance);
-        console.log('   Pending:', wallet.pendingBalance);
-
-        // Mark as completed and add balance
-        transaction.status = 'completed';
-        transaction.completedAt = new Date();
-        
-        // Build description with admin action
-        const adminUsername = req.user.username || 'Admin';
-        transaction.description = transaction.description 
-            ? `${transaction.description} - Manually completed by ${adminUsername}`
-            : `${transaction.paymentMethod || 'Deposit'} - Manually completed by ${adminUsername}`;
-
-        // Add admin notes to transaction metadata
-        const metadata = {
-            manuallyCompleted: true,
-            completedBy: adminUsername,
+        // ✅ Use centralized helper
+        const result = await completeDepositWithBonus(walletId, transactionId, {
+            completedBy: req.user.username || 'Admin',
             completedByUserId: req.user.userId,
-            completedAt: new Date().toISOString(),
-            adminNotes: notes || 'Manually verified and completed by admin',
-            originalStatus: 'pending',
-            paymentMethod: transaction.paymentMethod,
-            amount: transaction.amount
+            adminNotes: notes,
+            isManual: true
+        });
+
+        const responseData = {
+            transactionId: transactionId,
+            userId: result.wallet.userId,
+            amount: result.transaction.amount,
+            previousStatus: 'pending',
+            newStatus: 'completed',
+            paymentMethod: result.transaction.paymentMethod,
+            completedBy: req.user.username || 'Admin',
+            completedAt: result.transaction.completedAt,
+            wallet: result.wallet
         };
-        
-        transaction.notes = JSON.stringify(metadata);
 
-        // Add amount to balance (deposit adds money)
-        wallet.balance += transaction.amount;
-        wallet.updateAvailableBalance();
+        // Add bonus info if applicable
+        if (result.bonusInfo) {
+            responseData.bonusApplied = result.bonusInfo;
+        }
 
-        await wallet.save();
-
-        console.log('\n💰 Balance State AFTER Update:');
-        console.log('   Balance:', wallet.balance);
-        console.log('   Available:', wallet.availableBalance);
-        console.log('   Pending:', wallet.pendingBalance);
-        console.log('   Amount Added:', `$${transaction.amount}`);
-
-        console.log('\n✅ Deposit manually completed successfully');
-        console.log('🔧 ═══════════════════════════════════════════════════');
-        console.log('✅ MANUAL DEPOSIT COMPLETION SUCCESS');
-        console.log('🔧 ═══════════════════════════════════════════════════\n');
+        const message = result.bonusInfo 
+            ? `Deposit of $${result.transaction.amount.toFixed(2)} manually completed with ${result.bonusInfo.description} of $${result.bonusInfo.amount.toFixed(2)}!`
+            : `Deposit of $${result.transaction.amount.toFixed(2)} manually completed successfully`;
 
         res.json({
             success: true,
-            message: `Deposit of $${transaction.amount.toFixed(2)} manually completed successfully`,
-            data: {
-                transactionId: transaction._id,
-                userId: wallet.userId._id,
-                username: wallet.userId.username,
-                userEmail: wallet.userId.email,
-                amount: transaction.amount,
-                previousStatus: 'pending',
-                newStatus: 'completed',
-                paymentMethod: transaction.paymentMethod,
-                completedBy: adminUsername,
-                completedAt: transaction.completedAt,
-                wallet: {
-                    newBalance: wallet.balance,
-                    newAvailableBalance: wallet.availableBalance,
-                    newPendingBalance: wallet.pendingBalance
-                }
-            }
+            message,
+            data: responseData
         });
 
     } catch (error) {
-        console.error('\n❌❌❌ ERROR IN MANUAL DEPOSIT COMPLETION');
-        console.error('Error name:', error.name);
-        console.error('Error message:', error.message);
-        console.error('Error stack:', error.stack);
-        console.log('🔧 ═══════════════════════════════════════════════════');
-        console.log('❌ MANUAL DEPOSIT COMPLETION FAILED');
-        console.log('🔧 ═══════════════════════════════════════════════════\n');
-        
+        console.error('Error in manualCompleteDeposit:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to manually complete deposit',
+            message: error.message || 'Failed to manually complete deposit',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 };
+
+
+
+const getSettings = async (req, res) => {
+  try {
+    const settings = await Settings.getSettings();
+    
+    res.json({
+      success: true,
+      data: settings
+    });
+  } catch (error) {
+    console.error('Error fetching settings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch settings',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const updateSignupBonus = async (req, res) => {
+  try {
+    const { amount, enabled } = req.body;
+    
+    if (amount === undefined || amount < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid amount is required (must be >= 0)'
+      });
+    }
+    
+    const settings = await Settings.getSettings();
+    await settings.updateSignupBonus(amount, enabled !== false);
+    
+    res.json({
+      success: true,
+      message: 'Signup bonus updated successfully',
+      data: {
+        signupBonus: settings.signupBonus
+      }
+    });
+  } catch (error) {
+    console.error('Error updating signup bonus:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update signup bonus',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const updateFirstDepositBonus = async (req, res) => {
+  try {
+    const { percentage, minDeposit, maxBonus, enabled } = req.body;
+    
+    if (percentage === undefined || percentage < 0 || percentage > 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid percentage is required (0-500%)'
+      });
+    }
+    
+    if (minDeposit === undefined || minDeposit < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid minimum deposit is required'
+      });
+    }
+    
+    const settings = await Settings.getSettings();
+    await settings.updateFirstDepositBonus(
+      percentage, 
+      minDeposit, 
+      maxBonus || null, 
+      enabled !== false
+    );
+    
+    res.json({
+      success: true,
+      message: 'First deposit bonus updated successfully',
+      data: {
+        firstDepositBonus: settings.firstDepositBonus
+      }
+    });
+  } catch (error) {
+    console.error('Error updating first deposit bonus:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update first deposit bonus',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const createPromotionalBonus = async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      bonusPercentage,
+      bonusType,
+      startDate,
+      endDate,
+      minDeposit,
+      maxBonus,
+      termsAndConditions,
+      isVisible
+    } = req.body;
+    
+    if (!title || !bonusPercentage || !startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title, bonus percentage, start date, and end date are required'
+      });
+    }
+    
+    if (bonusPercentage < 0 || bonusPercentage > 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bonus percentage must be between 0 and 500%'
+      });
+    }
+    
+    if (new Date(startDate) >= new Date(endDate)) {
+      return res.status(400).json({
+        success: false,
+        message: 'End date must be after start date'
+      });
+    }
+    
+    const settings = await Settings.getSettings();
+    
+    const bonusData = {
+      title,
+      description: description || '',
+      bonusPercentage,
+      bonusType: bonusType || 'deposit',
+      startDate: new Date(startDate),
+      endDate: new Date(endDate),
+      minDeposit: minDeposit || 0,
+      maxBonus: maxBonus || null,
+      termsAndConditions: termsAndConditions || '',
+      isVisible: isVisible !== false
+    };
+    
+    await settings.addPromotionalBonus(bonusData);
+    
+    res.json({
+      success: true,
+      message: 'Promotional bonus created successfully',
+      data: {
+        bonus: settings.promotionalBonuses[settings.promotionalBonuses.length - 1]
+      }
+    });
+  } catch (error) {
+    console.error('Error creating promotional bonus:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create promotional bonus',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const updatePromotionalBonus = async (req, res) => {
+  try {
+    const { bonusId } = req.params;
+    const updateData = req.body;
+    
+    if (!bonusId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bonus ID is required'
+      });
+    }
+    
+    if (updateData.startDate && updateData.endDate) {
+      if (new Date(updateData.startDate) >= new Date(updateData.endDate)) {
+        return res.status(400).json({
+          success: false,
+          message: 'End date must be after start date'
+        });
+      }
+    }
+    
+    const settings = await Settings.getSettings();
+    await settings.updatePromotionalBonus(bonusId, updateData);
+    
+    const updatedBonus = settings.promotionalBonuses.id(bonusId);
+    
+    res.json({
+      success: true,
+      message: 'Promotional bonus updated successfully',
+      data: {
+        bonus: updatedBonus
+      }
+    });
+  } catch (error) {
+    console.error('Error updating promotional bonus:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to update promotional bonus',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const deletePromotionalBonus = async (req, res) => {
+  try {
+    const { bonusId } = req.params;
+    
+    if (!bonusId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Bonus ID is required'
+      });
+    }
+    
+    const settings = await Settings.getSettings();
+    await settings.deletePromotionalBonus(bonusId);
+    
+    res.json({
+      success: true,
+      message: 'Promotional bonus deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting promotional bonus:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete promotional bonus',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+
+const getActivePromotionalBonus = async (req, res) => {
+  try {
+    const settings = await Settings.getSettings();
+    const activeBonus = settings.getActivePromotionalBonus();
+    
+    res.json({
+      success: true,
+      data: {
+        activeBonus: activeBonus || null,
+        signupBonus: settings.signupBonus,  // ✅ Add signup bonus
+        firstDepositBonus: settings.firstDepositBonus
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching active promotional bonus:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch active promotional bonus',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const updateGeneralSettings = async (req, res) => {
+  try {
+    const { siteName, siteDescription, maintenanceMode, registrationEnabled, emailVerificationRequired } = req.body;
+    
+    const settings = await Settings.getSettings();
+    
+    if (siteName !== undefined) settings.general.siteName = siteName;
+    if (siteDescription !== undefined) settings.general.siteDescription = siteDescription;
+    if (maintenanceMode !== undefined) settings.general.maintenanceMode = maintenanceMode;
+    if (registrationEnabled !== undefined) settings.general.registrationEnabled = registrationEnabled;
+    if (emailVerificationRequired !== undefined) settings.general.emailVerificationRequired = emailVerificationRequired;
+    
+    await settings.save();
+    
+    res.json({
+      success: true,
+      message: 'General settings updated successfully',
+      data: {
+        general: settings.general
+      }
+    });
+  } catch (error) {
+    console.error('Error updating general settings:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update general settings',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
 
 // Don't forget to export these new functions
 module.exports = {
@@ -1410,6 +1614,15 @@ module.exports = {
     getGames,
     getWalletStats,
     getUserWallet,
-    getDebugUsersWithWallets
+    getDebugUsersWithWallets,
+
+    getSettings,
+  updateSignupBonus,
+  updateFirstDepositBonus,
+  createPromotionalBonus,
+  updatePromotionalBonus,
+  deletePromotionalBonus,
+  getActivePromotionalBonus,
+  updateGeneralSettings
 };
 

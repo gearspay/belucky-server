@@ -25,6 +25,7 @@ const gameRoutes = require('./routes/gameRoutes');
 const walletRoutes = require('./routes/walletRoutes');
 const adminAuthRoutes = require('./routes/adminAuthRoutes');
 const adminDataRoutes = require('./routes/adminDataRoutes');
+const adminSettingsRoutes = require('./routes/adminSettingsRoutes');
 const gameAdminRoutes = require('./routes/gameAdminRoutes');
 const publicRoutes = require('./routes/publicRoutes');
 const spinWheelRoutes = require('./routes/spinWheelRoutes');
@@ -125,7 +126,7 @@ const connectDB = async () => {
 connectDB();
 
 // ================================
-// API ROUTES
+// API ROUTES - ✅ UNIQUE BONUS ROUTE
 // ================================
 
 app.post('/api/test-post', (req, res) => {
@@ -137,12 +138,17 @@ app.use('/api/user', userRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/wallet', walletRoutes);
-app.use('/api/admin', adminAuthRoutes);
+
+// ✅ COMPLETELY UNIQUE ROUTE PATH - No conflicts!
+app.use('/api/bonus-settings', adminSettingsRoutes);
+
+app.use('/api/admin/spin-wheel', adminSpinRoutes);
 app.use('/api/admin-data', adminDataRoutes);
+app.use('/api/admin', adminAuthRoutes);
 app.use('/api/admin', gameAdminRoutes);
+
 app.use('/api/public', publicRoutes);
 app.use('/api/spin-wheel', spinWheelRoutes);
-app.use('/api/admin/spin-wheel', adminSpinRoutes);
 app.use('/api/referral', referralRoutes);
 app.use('/api/payment', paymentRoutes);
 app.use('/api/cashout-rules', cashoutRulesRoutes);
@@ -230,6 +236,12 @@ app.listen(PORT, () => {
   console.log('║                                                            ║');
   console.log('║  🔄 BACKGROUND JOBS:                                       ║');
   console.log('║     • Chime payment verification (Every 2 minutes)         ║');
+  console.log('║                                                            ║');
+  console.log('║  🎁 BONUS SYSTEM:                                          ║');
+  console.log('║     • Signup bonus (configurable)                          ║');
+  console.log('║     • First deposit bonus (configurable)                   ║');
+  console.log('║     • Promotional campaigns (time-limited)                 ║');
+  console.log('║     • API: /api/bonus-settings (admin protected)           ║');
   console.log('║                                                            ║');
   console.log('║  🔐 SECURITY:                                              ║');
   console.log('║     • Helmet.js enabled                                    ║');

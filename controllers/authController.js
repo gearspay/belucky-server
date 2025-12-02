@@ -6,6 +6,8 @@ const Wallet = require('../models/Wallet');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const emailService = require('../services/emailService');
+const Settings = require('../models/Settings'); // Add this import at top
+
 
 // ========================================
 // NEW: SEND OTP FOR EMAIL VERIFICATION
@@ -193,6 +195,9 @@ const verifyOTP = async (req, res) => {
 // ========================================
 // UPDATED: REGISTER (NOW REQUIRES VERIFIED EMAIL)
 // ========================================
+// Updated register function in authController.js - Replace the existing register function
+
+
 const register = async (req, res) => {
   const role = 2;
   const { username, password, email, affiliateUsername } = req.body;
@@ -275,31 +280,45 @@ const register = async (req, res) => {
       role,
       profile: {
         email: lowercaseEmail,
-        emailVerified: true // ✅ Mark as verified
+        emailVerified: true
       }
     });
 
     // Save the new user to the database
     const newUser = await user.save();
 
-    // ✅ AWARD $3 SIGNUP BONUS TO EVERY NEW USER
+    // ✅ GET SIGNUP BONUS FROM SETTINGS (NOT HARDCODED)
+    let signupBonusAmount = 0;
     try {
-      const newUserWallet = await Wallet.findOrCreateWallet(newUser._id);
-      newUserWallet.addTransaction({
-        type: 'bonus',
-        amount: 3,
-        description: 'Welcome signup bonus',
-        status: 'completed',
-        isBonus: true,
-        metadata: {
-          source: 'signup_bonus',
-          rewardType: 'welcome_bonus'
-        }
-      });
-      await newUserWallet.save();
-      console.log('✅ $3 signup bonus awarded to new user');
-    } catch (signupBonusError) {
-      console.error('Error awarding signup bonus:', signupBonusError);
+      const settings = await Settings.getSettings();
+      if (settings.signupBonus.enabled) {
+        signupBonusAmount = settings.signupBonus.amount || 0;
+      }
+    } catch (settingsError) {
+      console.error('Error fetching signup bonus settings:', settingsError);
+      signupBonusAmount = 3; // Fallback to $3 if settings fail
+    }
+
+    // ✅ AWARD SIGNUP BONUS (DYNAMIC FROM SETTINGS)
+    if (signupBonusAmount > 0) {
+      try {
+        const newUserWallet = await Wallet.findOrCreateWallet(newUser._id);
+        newUserWallet.addTransaction({
+          type: 'bonus',
+          amount: signupBonusAmount,
+          description: 'Welcome signup bonus',
+          status: 'completed',
+          isBonus: true,
+          metadata: {
+            source: 'signup_bonus',
+            rewardType: 'welcome_bonus'
+          }
+        });
+        await newUserWallet.save();
+        console.log(`✅ $${signupBonusAmount} signup bonus awarded to new user`);
+      } catch (signupBonusError) {
+        console.error('Error awarding signup bonus:', signupBonusError);
+      }
     }
 
     // Handle referral code if provided
@@ -383,12 +402,12 @@ const register = async (req, res) => {
     res.status(201).json({
       success: true,
       message: referralApplied ? 
-        `Account created successfully with referral code ${referralCode}! $3 signup bonus added.` : 
-        'Account created successfully! $3 signup bonus added.',
+        `Account created successfully with referral code ${referralCode}! $${signupBonusAmount} signup bonus added.` : 
+        `Account created successfully! $${signupBonusAmount} signup bonus added.`,
       data: {
         user: userResponse,
         referralApplied,
-        signupBonus: 3
+        signupBonus: signupBonusAmount
       }
     });
 

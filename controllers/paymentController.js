@@ -2,11 +2,14 @@
 const axios = require('axios');
 const https = require('https');
 const PaymentMethod = require('../models/PaymentMethod');
+const Settings = require('../models/Settings');
 const UserChimeDetails = require('../models/UserChimeDetails');
 const Wallet = require('../models/Wallet');
 const mailTmService = require('../services/mailTmService');
 const cashAppPollingService = require('../services/cashAppPollingService');
 const { makeAuthenticatedRequest } = require('../helpers/cashappAuthHelper');
+const { completeDepositWithBonus } = require('../helpers/depositHelper');
+
 
 // ================================
 // CRYPTO PAYMENT METHODS
@@ -170,6 +173,7 @@ const createPaymentRequest = async (req, res) => {
 };
 
 // Handle payment confirmation webhook
+// Handle payment confirmation webhook
 const confirmPayment = async (req, res) => {
     try {
         const paymentData = req.body;
@@ -245,7 +249,7 @@ const confirmPayment = async (req, res) => {
                     if (pendingTransactions.length > 0) {
                         const pendingTransaction = pendingTransactions[0];
                         
-                        const transactionNotes = JSON.stringify({
+                        const transactionNotes = {
                             crypto: crypto,
                             address: addr,
                             cryptoAmount: cryptoAmount,
@@ -256,19 +260,27 @@ const confirmPayment = async (req, res) => {
                             processed_at: new Date().toISOString(),
                             webhook_amount: depositAmount,
                             original_amount: pendingTransaction.amount
-                        });
+                        };
                         
-                        walletWithPendingTransaction.updateTransactionStatus(
-                            pendingTransaction._id, 
-                            'completed', 
-                            transactionNotes
+                        // ✅ Use centralized helper for deposit completion with bonus
+                        const { completeDepositWithBonus } = require('../helpers/depositHelper');
+                        
+                        const result = await completeDepositWithBonus(
+                            walletWithPendingTransaction._id,
+                            pendingTransaction._id,
+                            {
+                                completedBy: 'Crypto Gateway',
+                                isManual: false,
+                                metadata: transactionNotes
+                            }
                         );
                         
-                        pendingTransaction.txid = transactionHash;
-                        pendingTransaction.description = `${crypto} deposit - ${addr} (${cryptoAmount} ${crypto}) - TX: ${transactionHash}`;
-                        pendingTransaction.completedAt = new Date();
-                        
-                        await walletWithPendingTransaction.save();
+                        // Update crypto-specific fields
+                        const updatedWallet = await Wallet.findById(walletWithPendingTransaction._id);
+                        const updatedTransaction = updatedWallet.transactions.id(pendingTransaction._id);
+                        updatedTransaction.txid = transactionHash;
+                        updatedTransaction.description = `${crypto} deposit - ${addr} (${cryptoAmount} ${crypto}) - TX: ${transactionHash}`;
+                        await updatedWallet.save();
                         
                         res.status(200).json({
                             success: true,
@@ -281,7 +293,8 @@ const confirmPayment = async (req, res) => {
                                 crypto,
                                 transactionHash,
                                 status: 'completed',
-                                external_id: external_id
+                                external_id: external_id,
+                                bonusApplied: result.bonusInfo || null
                             }
                         });
                         
@@ -561,6 +574,7 @@ const processCryptoWithdrawal = async (cryptoAmount, cryptoType, destination, wa
     }
 };
 
+
 const updateWalletTransactionStatus = async (transactionId, status, metadata = {}) => {
     try {
         console.log('\n🔄 ====== UPDATE WALLET TRANSACTION STATUS ======');
@@ -592,9 +606,9 @@ const updateWalletTransactionStatus = async (transactionId, status, metadata = {
         console.log('   Type:', transactionType);
         console.log('   Amount:', transactionAmount);
         
-        // ✅ CRITICAL: Only update if status is actually changing
+        // Only update if status is actually changing
         if (oldStatus === status) {
-            console.log('⚠️  Status unchanged (', oldStatus, '->', status, '), skipping balance updates');
+            console.log('⚠️  Status unchanged, skipping balance updates');
             transaction.notes = JSON.stringify(metadata);
             await wallet.save();
             return transaction;
@@ -602,24 +616,51 @@ const updateWalletTransactionStatus = async (transactionId, status, metadata = {
         
         console.log('\n💰 Balance State BEFORE Update:');
         console.log('   Balance:', wallet.balance);
+        console.log('   Bonus Balance:', wallet.bonusBalance);
         console.log('   Available:', wallet.availableBalance);
         console.log('   Pending:', wallet.pendingBalance);
         
+        // ✅✅✅ FOR DEPOSIT COMPLETION - USE HELPER
+        if (status === 'completed' && transactionType === 'deposit' && oldStatus === 'pending') {
+            console.log('✅ Deposit completed - using centralized helper for bonus logic');
+            
+            try {
+                // Use the centralized helper
+                const result = await completeDepositWithBonus(wallet._id, transactionId, {
+                    completedBy: 'Payment Gateway',
+                    isManual: false,
+                    metadata: metadata
+                });
+                
+                console.log('✅ Deposit completion with bonus applied successfully');
+                if (result.bonusInfo) {
+                    console.log(`🎁 Bonus applied: $${result.bonusInfo.amount}`);
+                }
+                
+                return result.transaction;
+                
+            } catch (helperError) {
+                console.error('❌ Error in deposit helper, falling back to basic completion:', helperError);
+                // Fallback: just mark as completed without bonus
+                transaction.status = 'completed';
+                transaction.completedAt = new Date();
+                transaction.notes = JSON.stringify(metadata);
+                wallet.balance += transactionAmount;
+                wallet.updateAvailableBalance();
+                await wallet.save();
+                return transaction;
+            }
+        }
+        
+        // Handle other status changes (non-deposit or non-completion)
         transaction.status = status;
         transaction.notes = JSON.stringify(metadata);
         
-        // Handle status changes
         if (status === 'completed') {
             transaction.completedAt = new Date();
             
-            // DEPOSIT: Add balance when completed (from pending)
-            if (transactionType === 'deposit' && oldStatus === 'pending') {
-                console.log('✅ Deposit completed - adding to balance');
-                wallet.balance += transactionAmount;
-            }
-            
-            // WITHDRAWAL: When completed, remove from pending balance AND deduct from balance
-            if (transactionType === 'withdrawal' && oldStatus === 'pending') {
+            // WITHDRAWAL: When completed, remove from pending and balance
+            if (transactionType === 'withdrawal') {
                 console.log('✅ Withdrawal completed - removing from pending and balance');
                 wallet.pendingBalance = Math.max(0, wallet.pendingBalance - transactionAmount);
                 wallet.balance = Math.max(0, wallet.balance - transactionAmount);
@@ -630,44 +671,22 @@ const updateWalletTransactionStatus = async (transactionId, status, metadata = {
         if (status === 'failed') {
             transaction.failedAt = new Date();
             
-            // DEPOSIT: Failed deposit - nothing to refund (balance was never added)
-            if (transactionType === 'deposit') {
-                console.log('❌ Deposit failed - no refund needed');
-            }
-            
-            // WITHDRAWAL: Only unlock from pending (balance was never deducted)
-            // ✅ FIX: DO NOT add back to balance - it was never deducted!
             if (transactionType === 'withdrawal' && oldStatus === 'pending') {
                 console.log('💰 Withdrawal failed - UNLOCKING from pending');
-                
-                const balanceBefore = wallet.balance;
-                const pendingBefore = wallet.pendingBalance;
-                
-                // ✅ FIX: ONLY remove from pending
-                // DO NOT add to balance - it was never deducted from balance, only locked in pending!
                 wallet.pendingBalance = Math.max(0, wallet.pendingBalance - transactionAmount);
-                
-                console.log('   Balance:   ', balanceBefore, '->', wallet.balance, '(UNCHANGED - this is correct!)');
-                console.log('   Pending:   ', pendingBefore, '->', wallet.pendingBalance, '(-', transactionAmount, ')');
-                // ✅ Available will be recalculated below using formula
-            } else if (transactionType === 'withdrawal' && oldStatus !== 'pending') {
-                console.log('⚠️  Withdrawal was not pending (status:', oldStatus, ') - NO REFUND');
             }
         }
         
-        // ✅ CRITICAL: Always recalculate available using the formula
-        // This ensures Available = Balance - Pending
-        const availableBefore = wallet.availableBalance;
-        wallet.availableBalance = wallet.balance - wallet.pendingBalance;
-        console.log('   Available: ', availableBefore, '->', wallet.availableBalance, '(recalculated from formula)');
+        // Recalculate available balance
+        wallet.updateAvailableBalance();
         
         await wallet.save();
         
         console.log('\n💰 Balance State AFTER Update:');
         console.log('   Balance:', wallet.balance);
+        console.log('   Bonus Balance:', wallet.bonusBalance);
         console.log('   Available:', wallet.availableBalance);
         console.log('   Pending:', wallet.pendingBalance);
-        console.log('   ✅ Formula Check: Available (', wallet.availableBalance, ') = Balance (', wallet.balance, ') - Pending (', wallet.pendingBalance, ')');
         console.log('✅ Transaction status updated successfully');
         console.log('🔄 ========================================\n');
         
@@ -1613,7 +1632,7 @@ const verifyChimePayment = async (req, res) => {
             console.log(`         Expected: $${transaction.amount}`);
             console.log(`         Match: ${amountMatches ? '✅' : '❌'}`);
             
-            // 2. IMPROVED NAME MATCHING - Using new function
+            // 2. IMPROVED NAME MATCHING - Using helper function
             const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
             
             console.log(`      👤 Name:`);
@@ -1655,37 +1674,53 @@ const verifyChimePayment = async (req, res) => {
                 verificationMethod: 'manual'
             };
 
-            wallet.updateTransactionStatus(
+            // ✅ Use centralized helper for deposit completion with bonus
+            const { completeDepositWithBonus } = require('../helpers/depositHelper');
+            
+            const result = await completeDepositWithBonus(
+                wallet._id,
                 transaction._id,
-                'completed',
-                JSON.stringify(metadata)
+                {
+                    completedBy: 'Chime Verification',
+                    isManual: true,
+                    metadata: metadata
+                }
             );
-
-            transaction.description = `Chime deposit from ${matchedPayment.senderName} - Verified`;
-            transaction.completedAt = new Date();
-
-            await wallet.save();
+            
+            // Update Chime-specific description
+            const updatedWallet = await Wallet.findById(wallet._id);
+            const updatedTransaction = updatedWallet.transactions.id(transaction._id);
+            updatedTransaction.description = `Chime deposit from ${matchedPayment.senderName} - Verified`;
+            await updatedWallet.save();
 
             console.log('\n💾 Transaction updated:');
             console.log('   Status: completed');
-            console.log('   New wallet balance: $' + wallet.balance);
-            console.log('   Available balance: $' + wallet.availableBalance);
+            console.log('   New wallet balance: $' + updatedWallet.balance);
+            console.log('   Available balance: $' + updatedWallet.availableBalance);
+            if (result.bonusInfo) {
+                console.log(`   🎁 Bonus applied: $${result.bonusInfo.amount}`);
+            }
             
             console.log('\n═══════════════════════════════════════════════════');
             console.log('✅ VERIFY CHIME PAYMENT SUCCESS');
             console.log('═══════════════════════════════════════════════════\n');
 
+            const successMessage = result.bonusInfo 
+                ? `Payment verified successfully with ${result.bonusInfo.description} of $${result.bonusInfo.amount}! Your balance has been updated.`
+                : 'Payment verified successfully! Your balance has been updated.';
+
             res.json({
                 success: true,
-                message: 'Payment verified successfully! Your balance has been updated.',
+                message: successMessage,
                 data: {
-                    transactionId: transaction._id,
-                    amount: transaction.amount,
+                    transactionId: updatedTransaction._id,
+                    amount: updatedTransaction.amount,
                     senderName: matchedPayment.senderName,
                     status: 'completed',
-                    completedAt: transaction.completedAt,
-                    newBalance: wallet.balance,
-                    availableBalance: wallet.availableBalance
+                    completedAt: updatedTransaction.completedAt,
+                    newBalance: updatedWallet.balance,
+                    availableBalance: updatedWallet.availableBalance,
+                    bonusApplied: result.bonusInfo || null
                 }
             });
 
@@ -1873,7 +1908,7 @@ const autoVerifyChimePayments = async () => {
                         const amountMatches = paymentDetails.amount &&
                                             Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
 
-                        // 2. IMPROVED NAME MATCHING - Using new function
+                        // 2. IMPROVED NAME MATCHING - Using helper function
                         const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
 
                         // 3. Date match (after transaction, within 30 minutes)
@@ -1901,23 +1936,34 @@ const autoVerifyChimePayments = async () => {
                                 autoVerified: true
                             };
 
-                            wallet.updateTransactionStatus(
+                            // ✅ Use centralized helper for deposit completion with bonus
+                            const { completeDepositWithBonus } = require('../helpers/depositHelper');
+                            
+                            const result = await completeDepositWithBonus(
+                                wallet._id,
                                 transaction._id,
-                                'completed',
-                                JSON.stringify(metadata)
+                                {
+                                    completedBy: 'Chime Auto-Verify',
+                                    isManual: false,
+                                    metadata: metadata
+                                }
                             );
-
-                            transaction.description = `Chime deposit from ${paymentDetails.senderName} - Auto-verified`;
-                            transaction.completedAt = new Date();
-
-                            await wallet.save();
+                            
+                            // Update Chime-specific description
+                            const updatedWallet = await Wallet.findById(wallet._id);
+                            const updatedTransaction = updatedWallet.transactions.id(transaction._id);
+                            updatedTransaction.description = `Chime deposit from ${paymentDetails.senderName} - Auto-verified`;
+                            await updatedWallet.save();
                             
                             verifiedCount++;
                             matched = true;
                             
                             console.log(`     ✅ Payment verified successfully!`);
-                            console.log(`     💰 New balance: $${wallet.balance}`);
-                            console.log(`     💳 Available balance: $${wallet.availableBalance}`);
+                            console.log(`     💰 New balance: $${updatedWallet.balance}`);
+                            console.log(`     💳 Available balance: $${updatedWallet.availableBalance}`);
+                            if (result.bonusInfo) {
+                                console.log(`     🎁 Bonus applied: $${result.bonusInfo.amount}`);
+                            }
                             
                             break;
                         } else {
@@ -2450,6 +2496,7 @@ const togglePaymentMethod = async (req, res) => {
     }
 };
 
+
 // Export all functions
 module.exports = {
 
@@ -2481,5 +2528,5 @@ module.exports = {
     saveCashappConfig,
     saveChimeConfig,
     getAllPaymentConfigs,
-    togglePaymentMethod
+    togglePaymentMethod,
 };
