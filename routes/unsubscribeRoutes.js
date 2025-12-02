@@ -216,10 +216,7 @@ router.get('/', async (req, res) => {
         </div>
 
         <div class="button-group">
-          <form method="POST" action="/api/unsubscribe/confirm" style="display: inline;">
-            <input type="hidden" name="email" value="${email}">
-            <button type="submit" class="btn btn-danger">Yes, Unsubscribe</button>
-          </form>
+          <a href="/api/unsubscribe/confirm?email=${encodeURIComponent(email)}" class="btn btn-danger">Yes, Unsubscribe</a>
           <a href="https://belucky.win" class="btn btn-secondary">No, Keep Me Subscribed</a>
         </div>
       </div>
@@ -228,11 +225,12 @@ router.get('/', async (req, res) => {
   `);
 });
 
-// @route   POST /api/unsubscribe/confirm
+// @route   GET/POST /api/unsubscribe/confirm
 // @desc    Process unsubscribe after confirmation
 // @access  Public
-router.post('/confirm', express.urlencoded({ extended: true }), async (req, res) => {
-  const { email } = req.body;
+const handleUnsubscribeConfirm = async (req, res) => {
+  // Support both GET and POST
+  const email = req.body.email || req.query.email;
   
   if (!email) {
     return res.redirect('/api/unsubscribe');
@@ -437,6 +435,10 @@ router.post('/confirm', express.urlencoded({ extended: true }), async (req, res)
       </html>
     `);
   }
-});
+};
+
+// Support both GET and POST for confirmation
+router.post('/confirm', express.urlencoded({ extended: true }), handleUnsubscribeConfirm);
+router.get('/confirm', handleUnsubscribeConfirm);
 
 module.exports = router;
