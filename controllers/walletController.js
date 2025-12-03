@@ -245,7 +245,6 @@ const sendWithdrawalRequestNotification = async (data) => {
 🔔 <b>NEW WITHDRAWAL REQUEST</b>
 
 👤 <b>User:</b> ${username}
-
 💰 <b>Amount:</b> $${amount.toFixed(2)}
 💸 <b>Fee:</b> $${fee.toFixed(2)}
 💵 <b>Net Amount:</b> $${netAmount.toFixed(2)}

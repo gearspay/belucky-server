@@ -216,54 +216,60 @@ class CashAppPollingService {
     /**
      * Handle successful payment
      */
-    async handleSuccessfulPayment(userId, transactionId, orderNo) {
-        try {
-            const wallet = await Wallet.findOne({ userId });
-            if (!wallet) {
-                throw new Error(`Wallet not found for user: ${userId}`);
-            }
-
-            const transaction = wallet.transactions.id(transactionId);
-            if (!transaction) {
-                throw new Error(`Transaction not found: ${transactionId}`);
-            }
-
-            // Check if already completed
-            if (transaction.status === 'completed') {
-                console.log(`Transaction already completed: ${transactionId}`);
-                return;
-            }
-
-            const transactionAmount = transaction.amount;
-
-            // Update transaction status
-            transaction.status = 'completed';
-            transaction.completedAt = new Date();
-            transaction.description = `Cashapp deposit - Payment verified via polling`;
-            transaction.notes = JSON.stringify({
-                orderNo: orderNo,
-                verifiedBy: 'cashapp_polling',
-                verifiedAt: new Date().toISOString()
-            });
-
-            // Update wallet balance
-            wallet.balance += transactionAmount;
-            wallet.availableBalance += transactionAmount;
-            wallet.updatedAt = new Date();
-
-            await wallet.save();
-
-            console.log(`✅ CashApp payment completed successfully:`);
-            console.log(`   User ID: ${userId}`);
-            console.log(`   Transaction ID: ${transactionId}`);
-            console.log(`   Amount: $${transactionAmount}`);
-            console.log(`   New Balance: $${wallet.balance}`);
-
-        } catch (error) {
-            console.error('❌ Error handling successful CashApp payment:', error);
-            throw error;
+    /**
+ * Handle successful payment
+ */
+async handleSuccessfulPayment(userId, transactionId, orderNo) {
+    try {
+        const wallet = await Wallet.findOne({ userId });
+        if (!wallet) {
+            throw new Error(`Wallet not found for user: ${userId}`);
         }
+
+        const transaction = wallet.transactions.id(transactionId);
+        if (!transaction) {
+            throw new Error(`Transaction not found: ${transactionId}`);
+        }
+
+        // Check if already completed
+        if (transaction.status === 'completed') {
+            console.log(`Transaction already completed: ${transactionId}`);
+            return;
+        }
+
+        console.log(`✅ CashApp payment verified - completing deposit with bonus check...`);
+
+        // ✅ Use centralized helper for deposit completion with bonus
+        const { completeDepositWithBonus } = require('../helpers/depositHelper');
+        
+        const result = await completeDepositWithBonus(
+            wallet._id,
+            transactionId,
+            {
+                completedBy: 'CashApp Polling',
+                isManual: false,
+                metadata: {
+                    orderNo: orderNo,
+                    verifiedBy: 'cashapp_polling',
+                    verifiedAt: new Date().toISOString()
+                }
+            }
+        );
+
+        console.log(`✅ CashApp payment completed successfully:`);
+        console.log(`   User ID: ${userId}`);
+        console.log(`   Transaction ID: ${transactionId}`);
+        console.log(`   Amount: $${result.transaction.amount}`);
+        console.log(`   New Balance: $${result.wallet.balance}`);
+        if (result.bonusInfo) {
+            console.log(`   🎁 Bonus Applied: $${result.bonusInfo.amount} (${result.bonusInfo.description})`);
+        }
+
+    } catch (error) {
+        console.error('❌ Error handling successful CashApp payment:', error);
+        throw error;
     }
+}
 
     /**
      * Handle failed payment
