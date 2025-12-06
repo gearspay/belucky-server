@@ -1807,6 +1807,179 @@ const updateGeneralSettings = async (req, res) => {
   }
 };
 
+// Add these functions to adminDataController.js
+
+// ================================
+// ANNOUNCEMENT MANAGEMENT
+// ================================
+
+const createAnnouncement = async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      icon,
+      iconColor,
+      tag,
+      isActive
+    } = req.body;
+    
+    // Validation
+    if (!title || !description) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title and description are required'
+      });
+    }
+
+    if (title.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title must be less than 100 characters'
+      });
+    }
+
+    if (description.length > 250) {
+      return res.status(400).json({
+        success: false,
+        message: 'Description must be less than 250 characters'
+      });
+    }
+    
+    const settings = await Settings.getSettings();
+    
+    const announcementData = {
+      title: title.trim(),
+      description: description.trim(),
+      icon: icon || 'card',
+      iconColor: iconColor || 'purple',
+      tag: tag || { label: '', color: 'yellow' },
+      isActive: isActive !== false
+    };
+    
+    await settings.addAnnouncement(announcementData);
+    
+    res.json({
+      success: true,
+      message: 'Announcement created successfully',
+      data: {
+        announcement: settings.announcements[settings.announcements.length - 1]
+      }
+    });
+  } catch (error) {
+    console.error('Error creating announcement:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to create announcement',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const updateAnnouncement = async (req, res) => {
+  try {
+    const { announcementId } = req.params;
+    const updateData = req.body;
+    
+    if (!announcementId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Announcement ID is required'
+      });
+    }
+
+    // Validation
+    if (updateData.title && updateData.title.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'Title must be less than 100 characters'
+      });
+    }
+
+    if (updateData.description && updateData.description.length > 250) {
+      return res.status(400).json({
+        success: false,
+        message: 'Description must be less than 250 characters'
+      });
+    }
+    
+    const settings = await Settings.getSettings();
+    
+    // Trim strings if present
+    if (updateData.title) updateData.title = updateData.title.trim();
+    if (updateData.description) updateData.description = updateData.description.trim();
+    if (updateData.tag?.label) updateData.tag.label = updateData.tag.label.trim();
+    
+    await settings.updateAnnouncement(announcementId, updateData);
+    
+    const updatedAnnouncement = settings.announcements.id(announcementId);
+    
+    res.json({
+      success: true,
+      message: 'Announcement updated successfully',
+      data: {
+        announcement: updatedAnnouncement
+      }
+    });
+  } catch (error) {
+    console.error('Error updating announcement:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to update announcement',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const deleteAnnouncement = async (req, res) => {
+  try {
+    const { announcementId } = req.params;
+    
+    if (!announcementId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Announcement ID is required'
+      });
+    }
+    
+    const settings = await Settings.getSettings();
+    await settings.deleteAnnouncement(announcementId);
+    
+    res.json({
+      success: true,
+      message: 'Announcement deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting announcement:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete announcement',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+const getActiveAnnouncements = async (req, res) => {
+  try {
+    const settings = await Settings.getSettings();
+    const activeAnnouncements = settings.getActiveAnnouncements();
+    
+    res.json({
+      success: true,
+      data: {
+        announcements: activeAnnouncements
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching active announcements:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch active announcements',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
 
 // Don't forget to export these new functions
 module.exports = {
@@ -1834,6 +2007,10 @@ module.exports = {
   updatePromotionalBonus,
   deletePromotionalBonus,
   getActivePromotionalBonus,
-  updateGeneralSettings
+  updateGeneralSettings,
+    createAnnouncement,
+  updateAnnouncement,
+  deleteAnnouncement,
+  getActiveAnnouncements
 };
 

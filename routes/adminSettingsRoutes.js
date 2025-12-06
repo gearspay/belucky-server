@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 
-// ✅ CORRECT MIDDLEWARE IMPORTS (matching your other admin routes)
+// ✅ CORRECT MIDDLEWARE IMPORTS
 const authMiddleware = require('../middleware/authMiddleware');
 const adminMiddleware = require('../middleware/adminMiddleware');
 
@@ -15,7 +15,12 @@ const {
   updatePromotionalBonus,
   deletePromotionalBonus,
   getActivePromotionalBonus,
-  updateGeneralSettings
+  updateGeneralSettings,
+  // ✅ NEW: Announcement functions
+  createAnnouncement,
+  updateAnnouncement,
+  deleteAnnouncement,
+  getActiveAnnouncements
 } = require('../controllers/adminDataController');
 
 // ================================
@@ -26,6 +31,11 @@ const {
 // @desc    Get active promotional bonus (PUBLIC - for hero section)
 // @access  Public
 router.get('/active-bonus', getActivePromotionalBonus);
+
+// @route   GET /api/settings/active-announcements
+// @desc    Get active announcements (PUBLIC - for announcement modal)
+// @access  Public
+router.get('/active-announcements', getActiveAnnouncements);
 
 // ================================
 // APPLY MIDDLEWARE TO PROTECTED ROUTES ONLY
@@ -38,7 +48,7 @@ router.use(adminMiddleware);
 // ================================
 
 // @route   GET /api/admin/settings
-// @desc    Get all settings (signup bonus, first deposit, promotional)
+// @desc    Get all settings (signup bonus, first deposit, promotional, announcements)
 // @access  Private/Admin
 router.get('/', getSettings);
 
@@ -70,6 +80,31 @@ router.put('/promotional-bonus/:bonusId', updatePromotionalBonus);
 // @desc    Delete promotional campaign
 // @access  Private/Admin
 router.delete('/promotional-bonus/:bonusId', deletePromotionalBonus);
+
+// ================================
+// ADMIN ANNOUNCEMENT ROUTES (All Protected)
+// ================================
+
+// @route   POST /api/admin/settings/announcement
+// @desc    Create new announcement
+// @access  Private/Admin
+// @body    { title, description, icon, iconColor, tag, priority, isActive, startDate, endDate, targetUsers, clickAction }
+router.post('/announcement', createAnnouncement);
+
+// @route   PUT /api/admin/settings/announcement/:announcementId
+// @desc    Update existing announcement
+// @access  Private/Admin
+// @body    { title, description, icon, iconColor, tag, priority, isActive, startDate, endDate, targetUsers, clickAction }
+router.put('/announcement/:announcementId', updateAnnouncement);
+
+// @route   DELETE /api/admin/settings/announcement/:announcementId
+// @desc    Delete announcement
+// @access  Private/Admin
+router.delete('/announcement/:announcementId', deleteAnnouncement);
+
+// ================================
+// GENERAL SETTINGS
+// ================================
 
 // @route   PUT /api/admin/settings/general
 // @desc    Update general settings

@@ -48,11 +48,52 @@ const promotionalBonusSchema = new mongoose.Schema({
     type: Number,
     default: null
   },
-  termsAndConditions: {
-    type: String,
-    default: ''
-  },
   isVisible: {
+    type: Boolean,
+    default: true
+  }
+}, { 
+  timestamps: true 
+});
+
+// ✅ SIMPLIFIED: Announcement Schema (removed priority, dates, targetUsers, clickAction)
+const announcementSchema = new mongoose.Schema({
+  title: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 100
+  },
+  description: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 250
+  },
+  icon: {
+    type: String,
+    enum: ['info', 'gift', 'card', 'money', 'lightning', 'star', 'bell', 'trophy'],
+    default: 'card'
+  },
+  iconColor: {
+    type: String,
+    enum: ['purple', 'green', 'blue', 'yellow', 'red', 'orange'],
+    default: 'purple'
+  },
+  tag: {
+    label: {
+      type: String,
+      trim: true,
+      maxlength: 15,
+      default: ''
+    },
+    color: {
+      type: String,
+      enum: ['yellow', 'green', 'blue', 'red', 'purple', 'orange'],
+      default: 'yellow'
+    }
+  },
+  isActive: {
     type: Boolean,
     default: true
   }
@@ -109,6 +150,8 @@ const settingsSchema = new mongoose.Schema({
   
   promotionalBonuses: [promotionalBonusSchema],
   
+  announcements: [announcementSchema],
+  
   general: {
     siteName: {
       type: String,
@@ -135,6 +178,7 @@ const settingsSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Static method to get or create settings
 settingsSchema.statics.getSettings = async function() {
   let settings = await this.findById('app_settings');
   
@@ -145,12 +189,14 @@ settingsSchema.statics.getSettings = async function() {
   return settings;
 };
 
+// Signup Bonus Methods
 settingsSchema.methods.updateSignupBonus = function(amount, enabled = true) {
   this.signupBonus.amount = amount;
   this.signupBonus.enabled = enabled;
   return this.save();
 };
 
+// First Deposit Bonus Methods
 settingsSchema.methods.updateFirstDepositBonus = function(percentage, minDeposit, maxBonus, enabled = true) {
   this.firstDepositBonus.percentage = percentage;
   this.firstDepositBonus.minDeposit = minDeposit;
@@ -159,6 +205,7 @@ settingsSchema.methods.updateFirstDepositBonus = function(percentage, minDeposit
   return this.save();
 };
 
+// Promotional Bonus Methods
 settingsSchema.methods.addPromotionalBonus = function(bonusData) {
   const bonus = {
     ...bonusData,
@@ -197,6 +244,35 @@ settingsSchema.methods.getActivePromotionalBonus = function() {
   );
 };
 
+// ✅ SIMPLIFIED: Announcement Methods (no complex filtering, just active status)
+settingsSchema.methods.addAnnouncement = function(announcementData) {
+  this.announcements.push(announcementData);
+  return this.save();
+};
+
+settingsSchema.methods.updateAnnouncement = function(announcementId, updateData) {
+  const announcement = this.announcements.id(announcementId);
+  if (!announcement) {
+    throw new Error('Announcement not found');
+  }
+  
+  Object.assign(announcement, updateData);
+  return this.save();
+};
+
+settingsSchema.methods.deleteAnnouncement = function(announcementId) {
+  this.announcements.pull(announcementId);
+  return this.save();
+};
+
+settingsSchema.methods.getActiveAnnouncements = function() {
+  // ✅ Simple filter: just return active announcements, ordered by creation date (newest first)
+  return this.announcements
+    .filter(announcement => announcement.isActive)
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+};
+
+// Bonus Status Calculator
 settingsSchema.methods.calculateBonusStatus = function(startDate, endDate) {
   const now = new Date();
   
@@ -217,6 +293,7 @@ settingsSchema.methods.updateAllBonusStatuses = function() {
   return this.save();
 };
 
+// Pre-save hook to update bonus statuses
 settingsSchema.pre('save', function(next) {
   if (this.promotionalBonuses && this.promotionalBonuses.length > 0) {
     this.promotionalBonuses.forEach(bonus => {
