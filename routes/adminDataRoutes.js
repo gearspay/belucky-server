@@ -34,6 +34,38 @@ router.get('/chart-data', adminDataController.getChartData);
 // @access  Private/Admin
 router.get('/users', adminDataController.getUsers);
 
+// @route   GET /api/admin-data/users/:userId
+// @desc    Get user details with transaction stats
+// @access  Private/Admin
+router.get('/users/:userId', adminDataController.getUserDetails);
+
+// @route   PUT /api/admin-data/users/:userId/status
+// @desc    Update user status (activate/suspend)
+// @access  Private/Admin
+router.put('/users/:userId/status', adminDataController.updateUserStatus);
+
+// ================================
+// ADMIN USER WALLET ACTIONS
+// ================================
+
+// @route   POST /api/admin-data/users/:userId/add-bonus
+// @desc    Add bonus to user's bonus balance (admin action)
+// @access  Private/Admin
+// @body    { amount, description }
+router.post('/users/:userId/add-bonus', adminDataController.addBonusToUser);
+
+// @route   POST /api/admin-data/users/:userId/add-deposit
+// @desc    Add deposit to user's regular balance (admin action)
+// @access  Private/Admin
+// @body    { amount, description }
+router.post('/users/:userId/add-deposit', adminDataController.addDepositToUser);
+
+// @route   POST /api/admin-data/users/:userId/redeem
+// @desc    Redeem/deduct from user's balance (admin action)
+// @access  Private/Admin
+// @body    { amount, description, balanceType: 'regular' | 'bonus' }
+router.post('/users/:userId/redeem', adminDataController.redeemFromUser);
+
 // ================================
 // TRANSACTIONS MANAGEMENT
 // ================================
@@ -59,14 +91,21 @@ router.get('/transactions/:transactionId', adminDataController.getTransactionDet
 // @body    { walletId, transactionId }
 router.post('/withdrawals/approve', adminDataController.approveWithdrawal);
 
-
-router.post('/deposits/manual-complete', adminDataController.manualCompleteDeposit);
-
 // @route   POST /api/admin-data/withdrawals/reject
 // @desc    Reject withdrawal request and refund to user
 // @access  Private/Admin
 // @body    { walletId, transactionId, reason }
 router.post('/withdrawals/reject', adminDataController.rejectWithdrawal);
+
+// ================================
+// DEPOSIT MANAGEMENT
+// ================================
+
+// @route   POST /api/admin-data/deposits/manual-complete
+// @desc    Manually complete a pending deposit
+// @access  Private/Admin
+// @body    { walletId, transactionId, notes }
+router.post('/deposits/manual-complete', adminDataController.manualCompleteDeposit);
 
 // ================================
 // GAMES & WALLET STATS
@@ -83,6 +122,74 @@ router.get('/games-stat', adminDataController.getGames);
 router.get('/wallet-stats', adminDataController.getWalletStats);
 
 // ================================
+// SETTINGS MANAGEMENT
+// ================================
+
+// @route   GET /api/admin-data/settings
+// @desc    Get all settings
+// @access  Private/Admin
+router.get('/settings', adminDataController.getSettings);
+
+// @route   PUT /api/admin-data/settings/signup-bonus
+// @desc    Update signup bonus settings
+// @access  Private/Admin
+router.put('/settings/signup-bonus', adminDataController.updateSignupBonus);
+
+// @route   PUT /api/admin-data/settings/first-deposit-bonus
+// @desc    Update first deposit bonus settings
+// @access  Private/Admin
+router.put('/settings/first-deposit-bonus', adminDataController.updateFirstDepositBonus);
+
+// @route   POST /api/admin-data/settings/promotional-bonus
+// @desc    Create promotional bonus
+// @access  Private/Admin
+router.post('/settings/promotional-bonus', adminDataController.createPromotionalBonus);
+
+// @route   PUT /api/admin-data/settings/promotional-bonus/:bonusId
+// @desc    Update promotional bonus
+// @access  Private/Admin
+router.put('/settings/promotional-bonus/:bonusId', adminDataController.updatePromotionalBonus);
+
+// @route   DELETE /api/admin-data/settings/promotional-bonus/:bonusId
+// @desc    Delete promotional bonus
+// @access  Private/Admin
+router.delete('/settings/promotional-bonus/:bonusId', adminDataController.deletePromotionalBonus);
+
+// @route   GET /api/admin-data/settings/promotional-bonus/active
+// @desc    Get active promotional bonus
+// @access  Private/Admin
+router.get('/settings/promotional-bonus/active', adminDataController.getActivePromotionalBonus);
+
+// @route   PUT /api/admin-data/settings/general
+// @desc    Update general settings
+// @access  Private/Admin
+router.put('/settings/general', adminDataController.updateGeneralSettings);
+
+// ================================
+// ANNOUNCEMENTS MANAGEMENT
+// ================================
+
+// @route   POST /api/admin-data/announcements
+// @desc    Create announcement
+// @access  Private/Admin
+router.post('/announcements', adminDataController.createAnnouncement);
+
+// @route   PUT /api/admin-data/announcements/:announcementId
+// @desc    Update announcement
+// @access  Private/Admin
+router.put('/announcements/:announcementId', adminDataController.updateAnnouncement);
+
+// @route   DELETE /api/admin-data/announcements/:announcementId
+// @desc    Delete announcement
+// @access  Private/Admin
+router.delete('/announcements/:announcementId', adminDataController.deleteAnnouncement);
+
+// @route   GET /api/admin-data/announcements/active
+// @desc    Get active announcements
+// @access  Private/Admin
+router.get('/announcements/active', adminDataController.getActiveAnnouncements);
+
+// ================================
 // DEBUG & UTILITY ROUTES
 // ================================
 
@@ -95,15 +202,5 @@ router.get('/user/:userId/wallet', adminDataController.getUserWallet);
 // @desc    Debug: Get users with wallet structures
 // @access  Private/Admin
 router.get('/debug/users-with-wallets', adminDataController.getDebugUsersWithWallets);
-
-// @route   PUT /api/admin-data/users/:userId/status
-// @desc    Update user status (activate/suspend)
-// @access  Private/Admin
-router.put('/users/:userId/status', adminDataController.updateUserStatus);
-
-// @route   GET /api/admin-data/users/:userId
-// @desc    Get user details with transaction stats
-// @access  Private/Admin
-router.get('/users/:userId', adminDataController.getUserDetails);
 
 module.exports = router;

@@ -64,7 +64,7 @@ const transactionSchema = new mongoose.Schema({
     },
     paymentMethod: {
         type: String,
-        enum: ['credit_card', 'bank_transfer', 'crypto', 'paypal', 'game_balance', 'cashapp', 'chime']
+        enum: ['credit_card', 'bank_transfer', 'crypto', 'paypal', 'game_balance', 'cashapp', 'chime', 'admin_manual', 'admin_redeem']
     },
     cashappTag: {
         type: String,

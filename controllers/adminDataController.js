@@ -1375,6 +1375,403 @@ const updateUserStatus = async (req, res) => {
     }
 };
 
+
+/**
+ * Add bonus to user's wallet (Admin action)
+ * POST /api/admin-data/users/:userId/add-bonus
+ */
+const addBonusToUser = async (req, res) => {
+    console.log('\n🎁 ═══════════════════════════════════════════════════');
+    console.log('🎁 ADMIN ADD BONUS TO USER');
+    console.log('🎁 ═══════════════════════════════════════════════════');
+    
+    try {
+        const { userId } = req.params;
+        const { amount, description } = req.body;
+        const adminId = req.user.userId; // From auth middleware
+
+        console.log('📋 Request Details:');
+        console.log('   User ID:', userId);
+        console.log('   Amount:', amount);
+        console.log('   Description:', description);
+        console.log('   Admin ID:', adminId);
+
+        // Validation
+        if (!amount || amount <= 0) {
+            console.log('❌ Invalid amount');
+            return res.status(400).json({
+                success: false,
+                message: 'Valid amount is required (must be greater than 0)'
+            });
+        }
+
+        if (amount > 100000) {
+            console.log('❌ Amount exceeds maximum');
+            return res.status(400).json({
+                success: false,
+                message: 'Maximum bonus amount is $100,000'
+            });
+        }
+
+        // Find user
+        const user = await User.findById(userId).select('username email');
+        if (!user) {
+            console.log('❌ User not found');
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        console.log('✅ User found:', user.username);
+
+        // Find admin user for logging
+        const admin = await User.findById(adminId).select('username');
+        const adminUsername = admin?.username || 'Admin';
+
+        // Get or create wallet
+        const wallet = await Wallet.findOrCreateWallet(userId);
+
+        console.log('\n💰 Wallet State BEFORE:');
+        console.log('   Bonus Balance:', wallet.bonusBalance);
+
+        // Add bonus using wallet method
+        const transaction = wallet.addBonus(
+            amount,
+            description || `Admin bonus added by ${adminUsername}`
+        );
+
+        // Save wallet
+        await wallet.save();
+
+        console.log('\n💰 Wallet State AFTER:');
+        console.log('   Bonus Balance:', wallet.bonusBalance);
+        console.log('   Transaction ID:', transaction._id);
+
+        console.log('\n✅ Bonus added successfully');
+        console.log('🎁 ═══════════════════════════════════════════════════\n');
+
+        res.json({
+            success: true,
+            message: `Bonus of $${amount.toFixed(2)} added successfully`,
+            data: {
+                transactionId: transaction._id,
+                amount: amount,
+                newBonusBalance: wallet.bonusBalance,
+                availableBonusBalance: wallet.availableBonusBalance,
+                user: {
+                    id: user._id,
+                    username: user.username,
+                    email: user.email
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('\n❌ Error adding bonus:', error);
+        console.log('🎁 ═══════════════════════════════════════════════════\n');
+        
+        res.status(500).json({
+            success: false,
+            message: 'Failed to add bonus',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+/**
+ * Add deposit to user's wallet (Admin action)
+ * POST /api/admin-data/users/:userId/add-deposit
+ */
+const addDepositToUser = async (req, res) => {
+    console.log('\n💰 ═══════════════════════════════════════════════════');
+    console.log('💰 ADMIN ADD DEPOSIT TO USER');
+    console.log('💰 ═══════════════════════════════════════════════════');
+    
+    try {
+        const { userId } = req.params;
+        const { amount, description } = req.body;
+        const adminId = req.user.userId; // From auth middleware
+
+        console.log('📋 Request Details:');
+        console.log('   User ID:', userId);
+        console.log('   Amount:', amount);
+        console.log('   Description:', description);
+        console.log('   Admin ID:', adminId);
+
+        // Validation
+        if (!amount || amount <= 0) {
+            console.log('❌ Invalid amount');
+            return res.status(400).json({
+                success: false,
+                message: 'Valid amount is required (must be greater than 0)'
+            });
+        }
+
+        if (amount > 100000) {
+            console.log('❌ Amount exceeds maximum');
+            return res.status(400).json({
+                success: false,
+                message: 'Maximum deposit amount is $100,000'
+            });
+        }
+
+        // Find user
+        const user = await User.findById(userId).select('username email');
+        if (!user) {
+            console.log('❌ User not found');
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        console.log('✅ User found:', user.username);
+
+        // Find admin user for logging
+        const admin = await User.findById(adminId).select('username');
+        const adminUsername = admin?.username || 'Admin';
+
+        // Get or create wallet
+        const wallet = await Wallet.findOrCreateWallet(userId);
+
+        console.log('\n💰 Wallet State BEFORE:');
+        console.log('   Balance:', wallet.balance);
+        console.log('   Available Balance:', wallet.availableBalance);
+
+        // Add deposit transaction (completed immediately)
+        const transaction = wallet.addTransaction({
+            type: 'deposit',
+            amount: amount,
+            description: description || `Admin deposit added by ${adminUsername}`,
+            paymentMethod: 'admin_manual',
+            status: 'completed',
+            fee: 0,
+            completedAt: new Date(),
+            metadata: {
+                addedBy: adminUsername,
+                addedByUserId: adminId,
+                isAdminDeposit: true,
+                timestamp: new Date().toISOString()
+            }
+        });
+
+        // Save wallet
+        await wallet.save();
+
+        console.log('\n💰 Wallet State AFTER:');
+        console.log('   Balance:', wallet.balance);
+        console.log('   Available Balance:', wallet.availableBalance);
+        console.log('   Transaction ID:', transaction._id);
+
+        console.log('\n✅ Deposit added successfully');
+        console.log('💰 ═══════════════════════════════════════════════════\n');
+
+        res.json({
+            success: true,
+            message: `Deposit of $${amount.toFixed(2)} added successfully`,
+            data: {
+                transactionId: transaction._id,
+                amount: amount,
+                newBalance: wallet.balance,
+                newAvailableBalance: wallet.availableBalance,
+                user: {
+                    id: user._id,
+                    username: user.username,
+                    email: user.email
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('\n❌ Error adding deposit:', error);
+        console.log('💰 ═══════════════════════════════════════════════════\n');
+        
+        res.status(500).json({
+            success: false,
+            message: 'Failed to add deposit',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+/**
+ * Redeem/Deduct from user's wallet (Admin action)
+ * POST /api/admin-data/users/:userId/redeem
+ */
+const redeemFromUser = async (req, res) => {
+    console.log('\n💸 ═══════════════════════════════════════════════════');
+    console.log('💸 ADMIN REDEEM FROM USER');
+    console.log('💸 ═══════════════════════════════════════════════════');
+    
+    try {
+        const { userId } = req.params;
+        const { amount, description, balanceType } = req.body; // balanceType: 'regular' or 'bonus'
+        const adminId = req.user.userId; // From auth middleware
+
+        console.log('📋 Request Details:');
+        console.log('   User ID:', userId);
+        console.log('   Amount:', amount);
+        console.log('   Balance Type:', balanceType || 'regular');
+        console.log('   Description:', description);
+        console.log('   Admin ID:', adminId);
+
+        // Validation
+        if (!amount || amount <= 0) {
+            console.log('❌ Invalid amount');
+            return res.status(400).json({
+                success: false,
+                message: 'Valid amount is required (must be greater than 0)'
+            });
+        }
+
+        if (amount > 100000) {
+            console.log('❌ Amount exceeds maximum');
+            return res.status(400).json({
+                success: false,
+                message: 'Maximum redeem amount is $100,000'
+            });
+        }
+
+        // Validate balance type
+        const type = balanceType || 'regular';
+        if (!['regular', 'bonus'].includes(type)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Balance type must be "regular" or "bonus"'
+            });
+        }
+
+        // Find user
+        const user = await User.findById(userId).select('username email');
+        if (!user) {
+            console.log('❌ User not found');
+            return res.status(404).json({
+                success: false,
+                message: 'User not found'
+            });
+        }
+
+        console.log('✅ User found:', user.username);
+
+        // Find admin user for logging
+        const admin = await User.findById(adminId).select('username');
+        const adminUsername = admin?.username || 'Admin';
+
+        // Get or create wallet
+        const wallet = await Wallet.findOrCreateWallet(userId);
+
+        console.log('\n💰 Wallet State BEFORE:');
+        console.log('   Regular Balance:', wallet.balance);
+        console.log('   Bonus Balance:', wallet.bonusBalance);
+        console.log('   Available Balance:', wallet.availableBalance);
+
+        // Check if user has sufficient balance
+        if (type === 'regular') {
+            if (wallet.availableBalance < amount) {
+                console.log('❌ Insufficient regular balance');
+                return res.status(400).json({
+                    success: false,
+                    message: `Insufficient balance. User has $${wallet.availableBalance.toFixed(2)} available, but you're trying to redeem $${amount.toFixed(2)}`
+                });
+            }
+        } else {
+            // Bonus balance
+            if (wallet.bonusBalance < amount) {
+                console.log('❌ Insufficient bonus balance');
+                return res.status(400).json({
+                    success: false,
+                    message: `Insufficient bonus balance. User has $${wallet.bonusBalance.toFixed(2)} bonus balance, but you're trying to redeem $${amount.toFixed(2)}`
+                });
+            }
+        }
+
+        // Create redeem transaction
+        const balanceBefore = wallet.balance;
+        const bonusBalanceBefore = wallet.bonusBalance;
+
+        let balanceAfter = balanceBefore;
+        let bonusBalanceAfter = bonusBalanceBefore;
+
+        if (type === 'regular') {
+            balanceAfter = Math.max(0, balanceBefore - amount);
+            wallet.balance = balanceAfter;
+        } else {
+            bonusBalanceAfter = Math.max(0, bonusBalanceBefore - amount);
+            wallet.bonusBalance = bonusBalanceAfter;
+        }
+
+        const transaction = {
+            type: 'withdrawal', // Using withdrawal type for redemption
+            amount: amount,
+            description: description || `Admin redemption by ${adminUsername} from ${type} balance`,
+            status: 'completed',
+            paymentMethod: 'admin_redeem',
+            fee: 0,
+            netAmount: amount,
+            balanceBefore: balanceBefore,
+            balanceAfter: balanceAfter,
+            bonusBalanceBefore: bonusBalanceBefore,
+            bonusBalanceAfter: bonusBalanceAfter,
+            completedAt: new Date(),
+            metadata: {
+                redeemedBy: adminUsername,
+                redeemedByUserId: adminId,
+                isAdminRedeem: true,
+                balanceType: type,
+                timestamp: new Date().toISOString()
+            }
+        };
+
+        wallet.transactions.push(transaction);
+        wallet.updateAvailableBalance();
+
+        // Save wallet
+        await wallet.save();
+
+        const savedTransaction = wallet.transactions[wallet.transactions.length - 1];
+
+        console.log('\n💰 Wallet State AFTER:');
+        console.log('   Regular Balance:', wallet.balance);
+        console.log('   Bonus Balance:', wallet.bonusBalance);
+        console.log('   Available Balance:', wallet.availableBalance);
+        console.log('   Transaction ID:', savedTransaction._id);
+
+        console.log('\n✅ Redemption successful');
+        console.log('💸 ═══════════════════════════════════════════════════\n');
+
+        res.json({
+            success: true,
+            message: `Successfully redeemed $${amount.toFixed(2)} from ${type} balance`,
+            data: {
+                transactionId: savedTransaction._id,
+                amount: amount,
+                balanceType: type,
+                newBalance: wallet.balance,
+                newBonusBalance: wallet.bonusBalance,
+                newAvailableBalance: wallet.availableBalance,
+                user: {
+                    id: user._id,
+                    username: user.username,
+                    email: user.email
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('\n❌ Error redeeming from user:', error);
+        console.log('💸 ═══════════════════════════════════════════════════\n');
+        
+        res.status(500).json({
+            success: false,
+            message: 'Failed to redeem from user',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    }
+};
+
+
+
 // Add this to get user details
 const getUserDetails = async (req, res) => {
     try {
@@ -1432,9 +1829,17 @@ const getUserDetails = async (req, res) => {
                     ...user,
                     wallet: wallet ? {
                         balance: wallet.balance || 0,
+                        bonusBalance: wallet.bonusBalance || 0,  // ✅ Added
                         availableBalance: wallet.availableBalance || 0,
+                        availableBonusBalance: wallet.availableBonusBalance || 0,  // ✅ Added
                         pendingBalance: wallet.pendingBalance || 0
-                    } : null
+                    } : {
+                        balance: 0,
+                        bonusBalance: 0,  // ✅ Added
+                        availableBalance: 0,
+                        availableBonusBalance: 0,  // ✅ Added
+                        pendingBalance: 0
+                    }
                 },
                 stats: {
                     totalDeposits,
@@ -1991,6 +2396,9 @@ module.exports = {
     getTransactionDetails,
     updateUserStatus, // ✅ Add this
     getUserDetails,   // ✅ Add this
+    addBonusToUser,
+    addDepositToUser,
+    redeemFromUser,
     manualCompleteDeposit,
 
     // Existing exports
