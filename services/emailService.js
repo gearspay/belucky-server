@@ -1,5 +1,5 @@
 const nodemailer = require('nodemailer');
-const { MailtrapTransport } = require('mailtrap');
+const mailtrap = require('mailtrap');
 
 class EmailService {
   constructor() {
@@ -21,11 +21,11 @@ class EmailService {
 
     console.log('🔧 Initializing Mailtrap with API token...');
     
-    this.transporter = nodemailer.createTransport(
-      MailtrapTransport({
-        token: process.env.MAILTRAP_API_TOKEN,
-      })
-    );
+    const transport = new mailtrap.MailtrapTransport({
+      token: process.env.MAILTRAP_API_TOKEN,
+    });
+    
+    this.transporter = nodemailer.createTransport(transport);
 
     this.initialized = true;
 
