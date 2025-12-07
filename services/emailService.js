@@ -21,7 +21,7 @@ class EmailService {
 
     console.log('🔧 Initializing Mailtrap with API token...');
     
-    const transport = new mailtrap.MailtrapTransport({
+    const transport = mailtrap.MailtrapTransport({
       token: process.env.MAILTRAP_API_TOKEN,
     });
     
