@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const paymentMethodSchema = new mongoose.Schema({
     method: {
         type: String,
-        enum: ['crypto', 'cashapp', 'chime', 'admin_manual'],
+        enum: ['crypto', 'cashapp', 'chime'],
         required: true,
         unique: true
     },

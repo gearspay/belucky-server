@@ -1,9 +1,10 @@
 const nodemailer = require('nodemailer');
-const { MailtrapTransport } = require('mailtrap');
+const { MailtrapClient } = require('mailtrap');
 
 class EmailService {
   constructor() {
     this.transporter = null;
+    this.mailtrapClient = null;
     this.initialized = false;
     this.websiteUrl = process.env.CLIENT_URL || 'https://belucky.win';
     
@@ -21,11 +22,21 @@ class EmailService {
 
     console.log('🔧 Initializing Mailtrap with API token...');
     
-    this.transporter = nodemailer.createTransport(
-      MailtrapTransport({
-        token: process.env.MAILTRAP_API_TOKEN,
-      })
-    );
+    // Initialize Mailtrap client for API operations
+    this.mailtrapClient = new MailtrapClient({
+      token: process.env.MAILTRAP_API_TOKEN,
+    });
+
+    // Initialize nodemailer transporter for sending emails
+    this.transporter = nodemailer.createTransport({
+      host: process.env.MAILTRAP_HOST || 'live.smtp.mailtrap.io',
+      port: process.env.MAILTRAP_PORT || 587,
+      secure: false, // Use TLS
+      auth: {
+        user: process.env.MAILTRAP_USERNAME || process.env.MAILTRAP_API_TOKEN,
+        pass: process.env.MAILTRAP_PASSWORD || process.env.MAILTRAP_API_TOKEN,
+      },
+    });
 
     this.initialized = true;
 
