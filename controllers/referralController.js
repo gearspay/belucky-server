@@ -1,4 +1,4 @@
-// controllers/referralController.js
+// controllers/referralController.js - FINAL COMPLETE VERSION
 const Referral = require('../models/Referral');
 const User = require('../models/User');
 const Wallet = require('../models/Wallet');
@@ -6,8 +6,6 @@ const { validationResult } = require('express-validator');
 const mongoose = require('mongoose');
 
 // Generate referral code for user
-// controllers/referralController.js
-
 const generateReferralCode = async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -20,19 +18,16 @@ const generateReferralCode = async (req, res) => {
       });
     }
 
-    // Check if user already has a referral code (template)
     const existingTemplate = await Referral.findOne({
       referrerId: userId,
-      referredUserId: null // Only find templates
+      referredUserId: null
     });
 
     let referralCode;
     
-    // If template exists, return it
     if (existingTemplate) {
       referralCode = existingTemplate.referralCode;
       
-      // Get count of actual referrals (where referredUserId is not null)
       const actualReferrals = await Referral.countDocuments({
         referrerId: userId,
         referredUserId: { $ne: null }
@@ -41,7 +36,7 @@ const generateReferralCode = async (req, res) => {
       const activeReferrals = await Referral.countDocuments({
         referrerId: userId,
         referredUserId: { $ne: null },
-        status: 'pending'
+        status: { $in: ['pending', 'active'] }
       });
 
       const baseUrl = process.env.FRONTEND_URL || `${req.protocol}://${req.get('host')}`;
@@ -53,9 +48,10 @@ const generateReferralCode = async (req, res) => {
           referralCode,
           referralLink: `${baseUrl}/register?ref=${referralCode}`,
           rewards: {
-            referrerReward: '10% of first 5 deposits',
-            referredReward: 5,
-            maxDeposits: 5
+            referrerReward: '10% of first 5 deposits + 5% lifetime',
+            referredReward: 0,
+            maxHighRewards: 5,
+            lifetimeRate: 5
           },
           totalReferrals: actualReferrals,
           activeReferrals: activeReferrals
@@ -63,7 +59,6 @@ const generateReferralCode = async (req, res) => {
       });
     }
 
-    // Generate new referral code if no template exists
     let isUnique = false;
     let attempts = 0;
     const maxAttempts = 10;
@@ -87,25 +82,27 @@ const generateReferralCode = async (req, res) => {
       });
     }
 
-    // Create ONLY ONE template record (no referredUserId)
     await Referral.create({
       referrerId: userId,
-      referredUserId: null, // Template - will never be filled
+      referredUserId: null,
       referralCode,
       status: 'pending',
       rewards: {
         referrerReward: 0,
-        referredReward: 5,
+        referredReward: 0,
         rewardType: 'percentage'
       },
       conditions: {
         minDeposit: 10,
-        minGamesPlayed: 1,
-        maxRewardDeposits: 5
+        minGamesPlayed: 0,
+        maxRewardDeposits: 5,
+        lifetimeRewardRate: 5
       },
       metadata: {
         depositCount: 0,
-        totalReferralEarnings: 0
+        totalReferralEarnings: 0,
+        highRewardEarnings: 0,
+        lifetimeEarnings: 0
       }
     });
 
@@ -118,9 +115,10 @@ const generateReferralCode = async (req, res) => {
         referralCode,
         referralLink: `${baseUrl}/register?ref=${referralCode}`,
         rewards: {
-          referrerReward: '10% of first 5 deposits',
-          referredReward: 5,
-          maxDeposits: 5
+          referrerReward: '10% of first 5 deposits + 5% lifetime',
+          referredReward: 0,
+          maxHighRewards: 5,
+          lifetimeRate: 5
         }
       }
     });
@@ -134,7 +132,6 @@ const generateReferralCode = async (req, res) => {
   }
 };
 
-// Fixed applyReferralCode - Creates NEW record for each referral
 const applyReferralCode = async (req, res) => {
   try {
     const { referralCode, newUserId } = req.body;
@@ -146,7 +143,6 @@ const applyReferralCode = async (req, res) => {
       });
     }
 
-    // Find ANY referral with this code to get the referrer
     const referralTemplate = await Referral.findOne({
       referralCode: referralCode.toUpperCase()
     }).populate('referrerId', 'username');
@@ -158,7 +154,6 @@ const applyReferralCode = async (req, res) => {
       });
     }
 
-    // Check if the new user exists
     const newUser = await User.findById(newUserId);
     if (!newUser) {
       return res.status(404).json({
@@ -167,7 +162,6 @@ const applyReferralCode = async (req, res) => {
       });
     }
 
-    // Check if user is trying to refer themselves
     if (referralTemplate.referrerId._id.toString() === newUserId) {
       return res.status(400).json({
         success: false,
@@ -175,7 +169,6 @@ const applyReferralCode = async (req, res) => {
       });
     }
 
-    // Check if this specific user has already been referred by ANYONE
     const alreadyReferred = await Referral.findOne({
       referredUserId: newUserId
     });
@@ -187,62 +180,46 @@ const applyReferralCode = async (req, res) => {
       });
     }
 
-    // Update the user with affiliate information
     await User.findByIdAndUpdate(newUserId, {
       affiliateId: referralTemplate.referrerId._id
     });
 
-    // CREATE A NEW referral record for this specific referred user
-    const newReferral = await Referral.create({
+    await Referral.create({
       referrerId: referralTemplate.referrerId._id,
       referredUserId: newUserId,
       referralCode: referralCode.toUpperCase(),
       status: 'pending',
       rewards: {
         referrerReward: 0,
-        referredReward: 5,
+        referredReward: 0,
         rewardType: 'percentage'
       },
       conditions: {
         minDeposit: 10,
-        minGamesPlayed: 1,
-        maxRewardDeposits: 5
+        minGamesPlayed: 0,
+        maxRewardDeposits: 5,
+        lifetimeRewardRate: 5
       },
       metadata: {
         referredUserIP: req.ip,
         referredUserAgent: req.get('User-Agent'),
         referralSource: 'code',
         depositCount: 0,
-        totalReferralEarnings: 0
+        totalReferralEarnings: 0,
+        highRewardEarnings: 0,
+        lifetimeEarnings: 0
       }
     });
-
-    // Award welcome bonus to new user
-    try {
-      const referredWallet = await Wallet.findOrCreateWallet(newUserId);
-      await referredWallet.addTransaction({
-        type: 'bonus',
-        amount: newReferral.rewards.referredReward,
-        description: `Welcome bonus - referred by ${referralTemplate.referrerId.username}`,
-        status: 'completed',
-        referenceId: newReferral._id,
-        metadata: {
-          source: 'referral_program',
-          rewardType: 'referred_bonus'
-        }
-      });
-    } catch (walletError) {
-      console.error('Error awarding welcome bonus:', walletError);
-      // Continue even if wallet bonus fails
-    }
 
     res.json({
       success: true,
       message: 'Referral applied successfully',
       data: {
         referrerUsername: referralTemplate.referrerId.username,
-        rewards: newReferral.rewards,
-        welcomeBonus: newReferral.rewards.referredReward
+        rewards: {
+          referrerReward: '10% of first 5 deposits + 5% lifetime',
+          referredReward: 0
+        }
       }
     });
 
@@ -255,71 +232,128 @@ const applyReferralCode = async (req, res) => {
   }
 };
 
-// Process referral reward on deposit
+// ✅ PROCESS REFERRAL REWARD - Adds to MAIN balance with type: 'bonus', isBonus: true
 const processDepositReferral = async (userId, depositAmount) => {
   try {
-    // Find if this user was referred
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('💰 PROCESSING REFERRAL REWARD');
+    console.log(`   User: ${userId}`);
+    console.log(`   Deposit Amount: $${depositAmount}`);
+    
+    // ✅ Find referral - Accept BOTH 'pending' and 'active' statuses
     const referral = await Referral.findOne({
       referredUserId: userId,
-      status: 'pending'
+      status: { $in: ['pending', 'active'] }
     }).populate('referrerId', 'username');
 
     if (!referral) {
+      console.log('   ❌ No active referral found');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
       return { success: false, message: 'No referral found' };
     }
 
-    // Check if we've already processed 5 deposits
-    const depositCount = referral.metadata?.depositCount || 0;
-    if (depositCount >= 5) {
-      return { success: false, message: 'Maximum referral deposits reached' };
-    }
+    console.log(`   ✅ Referral Found: ${referral.referralCode}`);
+    console.log(`   Referrer: ${referral.referrerId.username} (${referral.referrerId._id})`);
 
     // Check minimum deposit amount
     if (depositAmount < (referral.conditions?.minDeposit || 10)) {
+      console.log(`   ❌ Deposit below minimum ($${referral.conditions?.minDeposit || 10})`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
       return { success: false, message: 'Deposit amount below minimum' };
     }
 
-    // Calculate 10% reward
-    const rewardAmount = depositAmount * 0.10;
+    const depositCount = referral.metadata?.depositCount || 0;
+    const maxHighRewards = referral.conditions?.maxRewardDeposits || 5;
+    const lifetimeRate = referral.conditions?.lifetimeRewardRate || 5;
 
-    // Award reward to referrer
-    const referrerWallet = await Wallet.findOrCreateWallet(referral.referrerId);
-    await referrerWallet.addTransaction({
-      type: 'bonus',
+    console.log(`   Current Deposit Count: ${depositCount}`);
+    console.log(`   Max High Reward Deposits: ${maxHighRewards}`);
+
+    let rewardAmount = 0;
+    let rewardType = '';
+
+    // Determine reward rate
+    if (depositCount < maxHighRewards) {
+      // First 5 deposits: 10%
+      rewardAmount = depositAmount * 0.10;
+      rewardType = 'high_reward';
+      console.log(`   💎 HIGH REWARD (10%) - Deposit #${depositCount + 1}/${maxHighRewards}`);
+    } else {
+      // After 5th deposit: 5% lifetime
+      rewardAmount = depositAmount * (lifetimeRate / 100);
+      rewardType = 'lifetime_reward';
+      console.log(`   ♾️  LIFETIME REWARD (${lifetimeRate}%) - Deposit #${depositCount + 1}`);
+    }
+
+    console.log(`   Reward Amount: $${rewardAmount.toFixed(2)}`);
+
+    // ✅ Award reward to referrer's MAIN BALANCE
+    const referrerWallet = await Wallet.findOrCreateWallet(referral.referrerId._id);
+    
+    console.log(`   📊 Referrer Wallet Before:`);
+    console.log(`      Balance: $${referrerWallet.balance}`);
+    console.log(`      Available: $${referrerWallet.availableBalance}`);
+    
+    // ✅ Add transaction to MAIN balance (type: 'deposit', isBonus: true - like promotional bonus)
+    const rewardTransaction = referrerWallet.addTransaction({
+      type: 'deposit', // ✅ Use 'deposit' type so it goes to MAIN balance
       amount: rewardAmount,
-      description: `Referral bonus - ${referral.referredUserId.username || 'User'} deposit ${depositCount + 1}/5`,
+      description: `Referral bonus - ${referral.referredUserId?.username || 'User'} deposit ${depositCount + 1} (${rewardType === 'high_reward' ? '10%' : lifetimeRate + '%'})`,
       status: 'completed',
+      isBonus: true, // ✅ Flag as bonus for tracking
+      netAmount: rewardAmount,
+      completedAt: new Date(),
       referenceId: referral._id,
       metadata: {
         source: 'referral_program',
-        rewardType: 'referrer_deposit_bonus',
+        rewardType: rewardType,
         depositNumber: depositCount + 1,
         depositAmount: depositAmount,
-        bonusPercentage: 10
+        bonusPercentage: rewardType === 'high_reward' ? 10 : lifetimeRate,
+        referredUserId: userId,
+        referralCode: referral.referralCode
       }
     });
 
-    // Update referral metadata
+    await referrerWallet.save();
+
+    console.log(`   ✅ Reward added to referrer's MAIN wallet`);
+    console.log(`   📊 Referrer Wallet After:`);
+    console.log(`      Balance: $${referrerWallet.balance}`);
+    console.log(`      Available: $${referrerWallet.availableBalance}`);
+    console.log(`      Transaction ID: ${rewardTransaction._id}`);
+
+    // ✅ Update referral metadata
     referral.metadata.depositCount = depositCount + 1;
     referral.metadata.totalReferralEarnings = (referral.metadata.totalReferralEarnings || 0) + rewardAmount;
     
-    // If this was the 5th deposit, mark as completed
-    if (depositCount + 1 >= 5) {
-      referral.status = 'completed';
-      referral.completedAt = new Date();
+    if (rewardType === 'high_reward') {
+      referral.metadata.highRewardEarnings = (referral.metadata.highRewardEarnings || 0) + rewardAmount;
+    } else {
+      referral.metadata.lifetimeEarnings = (referral.metadata.lifetimeEarnings || 0) + rewardAmount;
     }
 
     await referral.save();
 
+    console.log(`   📊 Updated Referral Stats:`);
+    console.log(`      Total Deposits: ${referral.metadata.depositCount}`);
+    console.log(`      Total Earnings: $${referral.metadata.totalReferralEarnings.toFixed(2)}`);
+    console.log(`      High Reward Earnings: $${(referral.metadata.highRewardEarnings || 0).toFixed(2)}`);
+    console.log(`      Lifetime Earnings: $${(referral.metadata.lifetimeEarnings || 0).toFixed(2)}`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
     return {
       success: true,
       rewardAmount,
+      rewardType,
       depositNumber: depositCount + 1,
-      totalEarnings: referral.metadata.totalReferralEarnings
+      totalEarnings: referral.metadata.totalReferralEarnings,
+      transactionId: rewardTransaction._id,
+      referrerUsername: referral.referrerId.username
     };
 
   } catch (error) {
-    console.error('Process deposit referral error:', error);
+    console.error('❌ Process deposit referral error:', error);
     throw error;
   }
 };
@@ -328,54 +362,104 @@ const getReferralStats = async (req, res) => {
   try {
     const userId = req.user.userId;
 
-    // Get ONLY actual referrals (exclude templates where referredUserId is null)
+    // ✅ Get actual referrals (exclude templates) - Accept all non-cancelled statuses
     const referrals = await Referral.find({ 
       referrerId: userId,
-      referredUserId: { $ne: null } // IMPORTANT: Exclude templates
+      referredUserId: { $ne: null },
+      status: { $ne: 'cancelled' }
     })
       .populate('referredUserId', 'username profile.firstName profile.lastName account.createdAt')
       .sort({ createdAt: -1 });
 
-    // Calculate statistics
     const stats = {
       totalReferrals: referrals.length,
+      activeReferrals: 0,
       pendingReferrals: 0,
-      completedReferrals: 0,
       totalEarnings: 0,
+      highRewardEarnings: 0,
       lifetimeEarnings: 0
     };
 
     referrals.forEach(ref => {
+      if (ref.status === 'pending' || ref.status === 'active') {
+        stats.activeReferrals++;
+      }
       if (ref.status === 'pending') {
         stats.pendingReferrals++;
-      } else if (ref.status === 'completed') {
-        stats.completedReferrals++;
       }
       
       if (ref.metadata?.totalReferralEarnings) {
         stats.totalEarnings += ref.metadata.totalReferralEarnings;
       }
+      if (ref.metadata?.highRewardEarnings) {
+        stats.highRewardEarnings += ref.metadata.highRewardEarnings;
+      }
+      if (ref.metadata?.lifetimeEarnings) {
+        stats.lifetimeEarnings += ref.metadata.lifetimeEarnings;
+      }
     });
 
-    stats.lifetimeEarnings = stats.totalEarnings;
+    // Get deposit history for each referral
+    const formattedReferrals = await Promise.all(
+      referrals.map(async (ref) => {
+        let depositHistory = [];
+        
+        try {
+          const referredWallet = await Wallet.findOne({ userId: ref.referredUserId._id });
+          
+          if (referredWallet) {
+            depositHistory = referredWallet.transactions
+              .filter(t => 
+                t.type === 'deposit' && 
+                t.status === 'completed' &&
+                new Date(t.createdAt) >= new Date(ref.createdAt) &&
+                !t.isBonus // Only real deposits
+              )
+              .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt))
+              .map((deposit, index) => {
+                const depositNumber = index + 1;
+                const maxHighRewards = ref.conditions?.maxRewardDeposits || 5;
+                const lifetimeRate = ref.conditions?.lifetimeRewardRate || 5;
+                const isHighReward = depositNumber <= maxHighRewards;
+                const rewardRate = isHighReward ? 10 : lifetimeRate;
+                
+                return {
+                  depositNumber,
+                  amount: deposit.amount,
+                  rewardEarned: deposit.amount * (rewardRate / 100),
+                  rewardRate,
+                  rewardType: isHighReward ? 'high' : 'lifetime',
+                  date: deposit.createdAt,
+                  transactionId: deposit._id
+                };
+              });
+          }
+        } catch (error) {
+          console.error(`Error fetching deposits for referral ${ref._id}:`, error);
+        }
 
-    // Format referral data
-    const formattedReferrals = referrals.map(ref => ({
-      _id: ref._id,
-      referralCode: ref.referralCode,
-      referredUser: ref.referredUserId ? {
-        username: ref.referredUserId.username,
-        firstName: ref.referredUserId.profile?.firstName || '',
-        lastName: ref.referredUserId.profile?.lastName || '',
-        joinedAt: ref.referredUserId.account?.createdAt
-      } : null,
-      status: ref.status,
-      depositCount: ref.metadata?.depositCount || 0,
-      maxDeposits: ref.conditions?.maxRewardDeposits || 5,
-      earnings: ref.metadata?.totalReferralEarnings || 0,
-      createdAt: ref.createdAt,
-      completedAt: ref.completedAt
-    }));
+        return {
+          _id: ref._id,
+          referralCode: ref.referralCode,
+          referredUser: ref.referredUserId ? {
+            username: ref.referredUserId.username,
+            firstName: ref.referredUserId.profile?.firstName || '',
+            lastName: ref.referredUserId.profile?.lastName || '',
+            joinedAt: ref.referredUserId.account?.createdAt
+          } : null,
+          status: ref.status,
+          depositCount: ref.metadata?.depositCount || 0,
+          maxHighRewards: ref.conditions?.maxRewardDeposits || 5,
+          lifetimeRate: ref.conditions?.lifetimeRewardRate || 5,
+          earnings: ref.metadata?.totalReferralEarnings || 0,
+          highRewardEarnings: ref.metadata?.highRewardEarnings || 0,
+          lifetimeEarnings: ref.metadata?.lifetimeEarnings || 0,
+          depositHistory: depositHistory,
+          createdAt: ref.createdAt,
+          completedAt: ref.completedAt
+        };
+      })
+    );
 
     res.json({
       success: true,
@@ -395,14 +479,13 @@ const getReferralStats = async (req, res) => {
   }
 };
 
-// Validate referral code
 const validateReferralCode = async (req, res) => {
   try {
     const { code } = req.params;
 
     const referral = await Referral.findOne({
       referralCode: code.toUpperCase(),
-      status: 'pending'
+      status: { $in: ['pending', 'active'] }
     }).populate('referrerId', 'username profile.firstName profile.lastName');
 
     if (!referral) {
@@ -421,9 +504,10 @@ const validateReferralCode = async (req, res) => {
           name: `${referral.referrerId.profile?.firstName || ''} ${referral.referrerId.profile?.lastName || ''}`.trim()
         },
         rewards: {
-          referrerReward: '10% of first 5 deposits',
-          referredReward: referral.rewards.referredReward,
-          maxDeposits: 5
+          referrerReward: '10% of first 5 deposits + 5% lifetime',
+          referredReward: 0,
+          maxHighRewards: 5,
+          lifetimeRate: 5
         },
         conditions: referral.conditions
       }
@@ -438,17 +522,15 @@ const validateReferralCode = async (req, res) => {
   }
 };
 
-// Get user's referral code and link
 const getMyCode = async (req, res) => {
   try {
     const userId = req.user.userId;
     
     let referral = await Referral.findOne({
       referrerId: userId,
-      status: { $in: ['pending', 'completed'] }
+      referredUserId: null
     });
 
-    // Auto-generate if doesn't exist
     if (!referral) {
       const user = await User.findById(userId);
       if (!user) {
@@ -475,19 +557,23 @@ const getMyCode = async (req, res) => {
         referrerId: userId,
         referredUserId: null,
         referralCode,
+        status: 'pending',
         rewards: {
           referrerReward: 0,
-          referredReward: 5,
+          referredReward: 0,
           rewardType: 'percentage'
         },
         conditions: {
           minDeposit: 10,
-          minGamesPlayed: 1,
-          maxRewardDeposits: 5
+          minGamesPlayed: 0,
+          maxRewardDeposits: 5,
+          lifetimeRewardRate: 5
         },
         metadata: {
           depositCount: 0,
-          totalReferralEarnings: 0
+          totalReferralEarnings: 0,
+          highRewardEarnings: 0,
+          lifetimeEarnings: 0
         }
       });
     }
@@ -501,9 +587,10 @@ const getMyCode = async (req, res) => {
         referralCode: referral.referralCode,
         referralLink: `${baseUrl}/register?ref=${referral.referralCode}`,
         rewards: {
-          referrerReward: '10% of first 5 deposits',
-          referredReward: referral.rewards.referredReward,
-          maxDeposits: 5
+          referrerReward: '10% of first 5 deposits + 5% lifetime',
+          referredReward: 0,
+          maxHighRewards: 5,
+          lifetimeRate: 5
         },
         createdAt: referral.createdAt
       }
@@ -518,16 +605,16 @@ const getMyCode = async (req, res) => {
   }
 };
 
-// Get referral leaderboard
 const getLeaderboard = async (req, res) => {
   try {
     const leaderboard = await Referral.aggregate([
+      { $match: { referredUserId: { $ne: null }, status: { $ne: 'cancelled' } } },
       {
         $group: {
           _id: '$referrerId',
           totalReferrals: { $sum: 1 },
-          completedReferrals: {
-            $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] }
+          activeReferrals: {
+            $sum: { $cond: [{ $in: ['$status', ['pending', 'active']] }, 1, 0] }
           },
           totalEarnings: { $sum: { $ifNull: ['$metadata.totalReferralEarnings', 0] } }
         }
@@ -561,7 +648,7 @@ const getLeaderboard = async (req, res) => {
             }
           },
           totalReferrals: 1,
-          completedReferrals: 1,
+          activeReferrals: 1,
           totalEarnings: { $round: ['$totalEarnings', 2] }
         }
       }
@@ -582,7 +669,6 @@ const getLeaderboard = async (req, res) => {
   }
 };
 
-// Export all functions
 module.exports = {
   generateReferralCode,
   applyReferralCode,
@@ -590,5 +676,5 @@ module.exports = {
   validateReferralCode,
   getMyCode,
   getLeaderboard,
-  processDepositReferral // Export for use in wallet deposit handler
+  processDepositReferral
 };

@@ -200,6 +200,9 @@ const verifyOTP = async (req, res) => {
 // ========================================
 // REGISTER WITH IP TRACKING
 // ========================================
+// controllers/authController.js - COMPLETE REGISTER FUNCTION
+// Replace your entire register function with this
+
 const register = async (req, res) => {
   const role = 2;
   const { username, password, email, affiliateUsername } = req.body;
@@ -226,7 +229,7 @@ const register = async (req, res) => {
   }
 
   const lowercaseEmail = email.toLowerCase().trim();
-  const clientIP = getClientIP(req); // ✅ GETS REAL IP
+  const clientIP = getClientIP(req);
 
   console.log(`📍 Registration from IP: ${clientIP}, User-Agent: ${req.get('User-Agent')}`);
 
@@ -279,7 +282,7 @@ const register = async (req, res) => {
         emailVerified: true
       },
       account: {
-        signupIP: clientIP, // ✅ SAVE SIGNUP IP
+        signupIP: clientIP,
         lastLoginIP: clientIP,
         lastLogin: new Date(),
         loginHistory: [{
@@ -294,6 +297,7 @@ const register = async (req, res) => {
 
     console.log(`✅ User registered: ${username} from IP: ${clientIP}`);
 
+    // Award signup bonus
     let signupBonusAmount = 0;
     try {
       const settings = await Settings.getSettings();
@@ -327,65 +331,85 @@ const register = async (req, res) => {
       }
     }
 
+    // ✅ UPDATED REFERRAL LOGIC - 10% + 5% LIFETIME, NO REFERRED USER BONUS
     let referralApplied = false;
     let referralCode = affiliateUsername || verifiedOTP.metadata?.referralCode;
     
     if (referralCode) {
+      console.log(`\n🔗 Processing referral code: ${referralCode}`);
+      
       try {
         const referralTemplate = await Referral.findOne({
           referralCode: referralCode.toUpperCase(),
-          referredUserId: null
+          referredUserId: null // Find the template
         }).populate('referrerId', 'username');
 
         if (!referralTemplate) {
-          console.log('Invalid referral code provided:', referralCode);
+          console.log('   ❌ Invalid referral code provided');
         } else if (referralTemplate.referrerId._id.toString() === newUser._id.toString()) {
-          console.log('User tried to refer themselves');
+          console.log('   ❌ User tried to refer themselves');
         } else {
+          // Check if user already has a referral
           const alreadyReferred = await Referral.findOne({
             referredUserId: newUser._id
           });
 
-          if (!alreadyReferred) {
+          if (alreadyReferred) {
+            console.log('   ⚠️  User already has a referral applied');
+          } else {
+            // Update user's affiliateId
             await User.findByIdAndUpdate(newUser._id, {
               affiliateId: referralTemplate.referrerId._id
             });
 
-            await Referral.create({
+            // ✅ CREATE NEW REFERRAL RECORD
+            const newReferral = await Referral.create({
               referrerId: referralTemplate.referrerId._id,
-              referredUserId: newUser._id,
+              referredUserId: newUser._id, // ✅ CRITICAL: Set the referred user ID
               referralCode: referralCode.toUpperCase(),
               status: 'pending',
               rewards: {
                 referrerReward: 0,
-                referredReward: 5,
+                referredReward: 0, // ✅ NO SIGNUP BONUS FOR REFERRED USER
                 rewardType: 'percentage'
               },
               conditions: {
                 minDeposit: 10,
-                minGamesPlayed: 1,
-                maxRewardDeposits: 5
+                minGamesPlayed: 0, // ✅ No games required
+                maxRewardDeposits: 5, // First 5 deposits at 10%
+                lifetimeRewardRate: 5 // ✅ After 5th deposit at 5% forever
               },
               metadata: {
                 referredUserIP: clientIP,
                 referredUserAgent: req.get('User-Agent'),
                 referralSource: 'registration',
                 depositCount: 0,
-                totalReferralEarnings: 0
+                totalReferralEarnings: 0,
+                highRewardEarnings: 0, // ✅ Track 10% earnings
+                lifetimeEarnings: 0 // ✅ Track 5% earnings
               }
             });
 
             referralApplied = true;
-            console.log('Referral applied successfully:', referralCode);
+            
+            console.log('   ✅ Referral applied successfully!');
+            console.log(`      Referrer: ${referralTemplate.referrerId.username} (${referralTemplate.referrerId._id})`);
+            console.log(`      Referred: ${newUser.username} (${newUser._id})`);
+            console.log(`      Referral ID: ${newReferral._id}`);
+            console.log(`      Rewards: 10% on first 5 deposits, then 5% lifetime`);
           }
         }
       } catch (referralError) {
-        console.error('Error processing referral:', referralError);
+        console.error('   ❌ Error processing referral:', referralError);
       }
+    } else {
+      console.log('ℹ️  No referral code provided during registration');
     }
 
+    // Delete the OTP record after successful registration
     await OTP.findByIdAndDelete(verifiedOTP._id);
 
+    // Send welcome email (optional)
     emailService.sendWelcomeEmail(lowercaseEmail, username).catch(err => {
       console.error('Error sending welcome email:', err);
     });

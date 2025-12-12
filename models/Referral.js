@@ -1,4 +1,4 @@
-// models/Referral.js
+// models/Referral.js - UPDATED FOR 10% + 5% LIFETIME (Compatible with old data)
 const mongoose = require('mongoose');
 
 const referralSchema = new mongoose.Schema({
@@ -23,8 +23,8 @@ const referralSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'completed', 'cancelled'],
-    default: 'pending'
+    enum: ['pending', 'completed', 'cancelled', 'active'], // ✅ Added 'active'
+    default: 'pending' // Keep default for compatibility
   },
   rewards: {
     referrerReward: {
@@ -33,7 +33,7 @@ const referralSchema = new mongoose.Schema({
     },
     referredReward: {
       type: Number,
-      default: 5
+      default: 0 // ✅ Changed from 5 to 0 (no signup bonus)
     },
     rewardType: {
       type: String,
@@ -48,11 +48,15 @@ const referralSchema = new mongoose.Schema({
     },
     minGamesPlayed: {
       type: Number,
-      default: 1
+      default: 0 // ✅ Changed from 1 to 0
     },
     maxRewardDeposits: {
       type: Number,
-      default: 5
+      default: 5 // First 5 deposits at 10%
+    },
+    lifetimeRewardRate: { // ✅ NEW: After 5th deposit
+      type: Number,
+      default: 5 // 5% on all deposits after the 5th
     },
     completedAt: {
       type: Date,
@@ -62,13 +66,21 @@ const referralSchema = new mongoose.Schema({
   metadata: {
     referredUserIP: String,
     referredUserAgent: String,
-    referralSource: String, // 'link', 'code', 'social', 'registration', etc.
+    referralSource: String,
     campaignId: String,
     depositCount: {
       type: Number,
       default: 0
     },
     totalReferralEarnings: {
+      type: Number,
+      default: 0
+    },
+    highRewardEarnings: { // ✅ NEW: Track 10% earnings
+      type: Number,
+      default: 0
+    },
+    lifetimeEarnings: { // ✅ NEW: Track 5% earnings
       type: Number,
       default: 0
     }
@@ -139,68 +151,33 @@ referralSchema.statics.findOrCreateReferralCode = async function(userId, usernam
     referrerId: userId,
     referredUserId: null,
     referralCode,
-    status: 'pending',
+    status: 'pending', // Keep 'pending' for templates
     rewards: {
       referrerReward: 0,
-      referredReward: 5,
+      referredReward: 0, // ✅ No signup bonus
       rewardType: 'percentage'
     },
     conditions: {
       minDeposit: 10,
-      minGamesPlayed: 1,
-      maxRewardDeposits: 5
+      minGamesPlayed: 0,
+      maxRewardDeposits: 5,
+      lifetimeRewardRate: 5 // ✅ NEW
     },
     metadata: {
       depositCount: 0,
-      totalReferralEarnings: 0
+      totalReferralEarnings: 0,
+      highRewardEarnings: 0, // ✅ NEW
+      lifetimeEarnings: 0 // ✅ NEW
     }
   });
 
   return referralCode;
 };
 
-// Method to check if referral conditions are met
-referralSchema.methods.checkCompletionConditions = async function() {
-  const User = mongoose.model('User');
-  const referredUser = await User.findById(this.referredUserId);
-  
-  if (!referredUser) return false;
-  
-  const depositCount = this.metadata?.depositCount || 0;
-  const maxDeposits = this.conditions?.maxRewardDeposits || 5;
-  
-  const conditionsMet = {
-    hasDeposits: depositCount > 0,
-    reachedMaxDeposits: depositCount >= maxDeposits,
-    minGamesPlayed: referredUser.gameStats?.totalGamesPlayed >= (this.conditions?.minGamesPlayed || 1)
-  };
-  
-  return conditionsMet.reachedMaxDeposits && conditionsMet.minGamesPlayed;
-};
-
-// Method to complete referral and award rewards
-referralSchema.methods.complete = async function() {
-  if (this.status === 'completed') {
-    throw new Error('Referral already completed');
-  }
-  
-  const conditionsMet = await this.checkCompletionConditions();
-  if (!conditionsMet) {
-    throw new Error('Referral conditions not met');
-  }
-  
-  this.status = 'completed';
-  this.completedAt = new Date();
-  this.conditions.completedAt = new Date();
-  await this.save();
-  
-  return this;
-};
-
-// Method to process deposit and award referrer bonus
+// ✅ UPDATED: Process deposit with 10% (first 5) + 5% (lifetime) logic
 referralSchema.methods.processDeposit = async function(depositAmount) {
-  if (this.status !== 'pending') {
-    return { success: false, message: 'Referral not active' };
+  if (this.status === 'cancelled') {
+    return { success: false, message: 'Referral cancelled' };
   }
 
   if (!this.referredUserId) {
@@ -208,54 +185,54 @@ referralSchema.methods.processDeposit = async function(depositAmount) {
   }
 
   const depositCount = this.metadata?.depositCount || 0;
-  const maxDeposits = this.conditions?.maxRewardDeposits || 5;
-
-  if (depositCount >= maxDeposits) {
-    return { success: false, message: 'Maximum referral deposits reached' };
-  }
+  const maxHighRewards = this.conditions?.maxRewardDeposits || 5;
+  const lifetimeRate = this.conditions?.lifetimeRewardRate || 5;
 
   const minDeposit = this.conditions?.minDeposit || 10;
   if (depositAmount < minDeposit) {
     return { success: false, message: `Deposit amount below minimum ($${minDeposit})` };
   }
 
-  // Calculate 10% reward for referrer
-  const rewardAmount = depositAmount * 0.10;
+  // ✅ CALCULATE REWARD: 10% for first 5, then 5% forever
+  let rewardAmount = 0;
+  let rewardType = '';
+  
+  if (depositCount < maxHighRewards) {
+    // First 5 deposits: 10%
+    rewardAmount = depositAmount * 0.10;
+    rewardType = 'high_reward';
+    this.metadata.highRewardEarnings = (this.metadata.highRewardEarnings || 0) + rewardAmount;
+  } else {
+    // After 5th deposit: 5% lifetime
+    rewardAmount = depositAmount * (lifetimeRate / 100);
+    rewardType = 'lifetime_reward';
+    this.metadata.lifetimeEarnings = (this.metadata.lifetimeEarnings || 0) + rewardAmount;
+  }
 
   // Update metadata
   this.metadata.depositCount = depositCount + 1;
   this.metadata.totalReferralEarnings = (this.metadata.totalReferralEarnings || 0) + rewardAmount;
 
-  // If reached max deposits, mark as completed
-  if (this.metadata.depositCount >= maxDeposits) {
-    this.status = 'completed';
-    this.completedAt = new Date();
-    this.conditions.completedAt = new Date();
-  }
+  // ✅ NEVER mark as "completed" - it's lifetime now!
+  // Keep status as 'pending' or 'active' forever
 
   await this.save();
 
   return {
     success: true,
     rewardAmount,
+    rewardType,
     depositNumber: this.metadata.depositCount,
     totalEarnings: this.metadata.totalReferralEarnings,
-    isCompleted: this.status === 'completed'
+    highRewardEarnings: this.metadata.highRewardEarnings,
+    lifetimeEarnings: this.metadata.lifetimeEarnings,
+    isLifetime: depositCount >= maxHighRewards
   };
 };
 
-// Pre-save hook to handle automatic completion
+// ✅ REMOVED auto-completion logic since referrals are lifetime now
 referralSchema.pre('save', async function(next) {
-  // Auto-complete if conditions are met
-  if (this.status === 'pending' && this.metadata?.depositCount >= (this.conditions?.maxRewardDeposits || 5)) {
-    this.status = 'completed';
-    if (!this.completedAt) {
-      this.completedAt = new Date();
-    }
-    if (!this.conditions.completedAt) {
-      this.conditions.completedAt = new Date();
-    }
-  }
+  // Don't auto-complete anymore - referrals are lifetime
   next();
 });
 

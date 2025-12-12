@@ -1,12 +1,11 @@
-// helpers/depositHelper.js
+// helpers/depositHelper.js - COMPLETE WITH REFERRAL PROCESSING
 const Wallet = require('../models/Wallet');
 const Settings = require('../models/Settings');
 const axios = require('axios');
 
-/**
- * Send Telegram notification
- * @param {Object} data - Notification data
- */
+// ✅ IMPORT THE REFERRAL PROCESSOR
+const { processDepositReferral } = require('../controllers/referralController');
+
 const sendTelegramNotification = async (data) => {
     try {
         const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -17,7 +16,7 @@ const sendTelegramNotification = async (data) => {
             return;
         }
 
-        const { type, username, email, amount, paymentMethod, transactionId, bonusInfo } = data;
+        const { type, username, email, amount, paymentMethod, transactionId, bonusInfo, referralInfo } = data;
 
         let message = '';
 
@@ -26,17 +25,23 @@ const sendTelegramNotification = async (data) => {
 🎉 <b>DEPOSIT COMPLETED</b>
 
 👤 <b>User:</b> ${username}
-
 💰 <b>Amount:</b> $${amount.toFixed(2)}
 💳 <b>Method:</b> ${paymentMethod}
 🆔 <b>Transaction ID:</b> ${transactionId}`;
 
             if (bonusInfo) {
-                message += `\n\n🎁 <b>BONUS APPLIED:</b>
+                message += `\n\n🎁 <b>DEPOSIT BONUS:</b>
 📊 <b>Type:</b> ${bonusInfo.type === 'first_deposit' ? 'First Deposit Bonus' : 'Promotional Bonus'}
 💵 <b>Bonus Amount:</b> $${bonusInfo.amount.toFixed(2)}
-📈 <b>Percentage:</b> ${bonusInfo.percentage}%
-📝 <b>Description:</b> ${bonusInfo.description}`;
+📈 <b>Percentage:</b> ${bonusInfo.percentage}%`;
+            }
+
+            if (referralInfo) {
+                message += `\n\n👥 <b>REFERRAL REWARD:</b>
+🎯 <b>Referrer:</b> ${referralInfo.referrerUsername}
+💰 <b>Earned:</b> $${referralInfo.rewardAmount.toFixed(2)} (${referralInfo.rewardType === 'high_reward' ? '10%' : '5%'})
+📊 <b>Deposit #:</b> ${referralInfo.depositNumber}
+💎 <b>Total Earned:</b> $${referralInfo.totalEarnings.toFixed(2)}`;
             }
 
             message += `\n\n⏰ <b>Time:</b> ${new Date().toLocaleString('en-US', { timeZone: 'UTC' })} UTC`;
@@ -54,17 +59,9 @@ const sendTelegramNotification = async (data) => {
 
     } catch (error) {
         console.error('❌ Error sending Telegram notification:', error.message);
-        // Don't throw error - notification failure shouldn't break deposit
     }
 };
 
-/**
- * Complete a deposit and apply any applicable bonuses
- * @param {String} walletId - Wallet ID
- * @param {String} transactionId - Transaction ID to complete
- * @param {Object} options - Additional options
- * @returns {Object} - Completion result with bonus info
- */
 const completeDepositWithBonus = async (walletId, transactionId, options = {}) => {
     console.log('\n🔧 ═══════════════════════════════════════════════════');
     console.log('💰 DEPOSIT COMPLETION WITH BONUS HELPER');
@@ -79,13 +76,11 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
             metadata = {}
         } = options;
 
-        // Find wallet
         const wallet = await Wallet.findById(walletId).populate('userId', 'username email');
         if (!wallet) {
             throw new Error('Wallet not found');
         }
 
-        // Find transaction
         const transaction = wallet.transactions.id(transactionId);
         if (!transaction) {
             throw new Error('Transaction not found');
@@ -96,13 +91,12 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
         console.log('   Amount:', `$${transaction.amount}`);
         console.log('   Status:', transaction.status);
         console.log('   Payment Method:', transaction.paymentMethod);
+        console.log('   User ID:', wallet.userId._id);
 
-        // Validate it's a deposit
         if (transaction.type !== 'deposit') {
             throw new Error('Only deposit transactions can be completed with bonus');
         }
 
-        // Validate it's pending
         if (transaction.status !== 'pending') {
             throw new Error(`Transaction is already ${transaction.status}`);
         }
@@ -115,14 +109,13 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
         console.log('   Available:', wallet.availableBalance);
         console.log('   Pending:', wallet.pendingBalance);
 
-        // ✅ Mark transaction as completed FIRST
+        // Mark transaction as completed
         transaction.status = 'completed';
         transaction.completedAt = new Date();
         transaction.description = transaction.description 
             ? `${transaction.description} - Completed by ${completedBy}`
             : `${transaction.paymentMethod || 'Deposit'} - Completed by ${completedBy}`;
 
-        // Store metadata
         const txMetadata = {
             completedBy,
             completedByUserId,
@@ -140,26 +133,25 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
         
         transaction.notes = JSON.stringify(txMetadata);
 
-        // ✅ Add deposit amount to MAIN balance
+        // Add deposit to MAIN balance
         wallet.balance += depositAmount;
         transaction.balanceAfter = wallet.balance;
 
         console.log('\n🎁 Checking for deposit bonuses...');
 
         let bonusInfo = null;
-        let totalBonusAmount = 0;
 
-        // ✅ Check for FIRST DEPOSIT BONUS
+        // Check for FIRST DEPOSIT BONUS
         const completedDepositsCount = wallet.transactions.filter(
             t => t._id.toString() !== transactionId.toString() && 
                  t.type === 'deposit' && 
-                 t.status === 'completed'
+                 t.status === 'completed' &&
+                 !t.isBonus
         ).length;
 
         console.log(`   Previous completed deposits: ${completedDepositsCount}`);
 
         if (completedDepositsCount === 0) {
-            // This is the first deposit
             console.log('   ✅ This is the FIRST deposit - checking first deposit bonus...');
             
             const settings = await Settings.getSettings();
@@ -174,17 +166,14 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
                     
                     console.log(`   🎉 First Deposit Bonus: ${settings.firstDepositBonus.percentage}% = $${bonusAmount}`);
                     
-                    // ✅ ADD BONUS TO MAIN BALANCE (not bonus balance)
                     wallet.balance += bonusAmount;
-                    totalBonusAmount += bonusAmount;
                     
-                    // ✅ Create a DEPOSIT transaction for tracking (type: 'deposit', isBonus: true)
                     wallet.transactions.push({
-                        type: 'deposit', // ✅ Type is 'deposit' not 'bonus'
+                        type: 'deposit',
                         amount: bonusAmount,
                         description: `First Deposit Bonus (${settings.firstDepositBonus.percentage}% on $${depositAmount})`,
                         status: 'completed',
-                        isBonus: true, // ✅ Flag it as bonus for tracking
+                        isBonus: true,
                         netAmount: bonusAmount,
                         balanceBefore: wallet.balance - bonusAmount,
                         balanceAfter: wallet.balance,
@@ -218,7 +207,6 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
         } else {
             console.log('   ℹ️  Not first deposit - checking promotional bonus...');
             
-            // Check for promotional bonus
             const settings = await Settings.getSettings();
             const activeBonus = settings.getActivePromotionalBonus();
             
@@ -231,17 +219,14 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
                 
                 console.log(`   🎉 Promotional Bonus: ${activeBonus.bonusPercentage}% = $${bonusAmount}`);
                 
-                // ✅ ADD BONUS TO MAIN BALANCE (not bonus balance)
                 wallet.balance += bonusAmount;
-                totalBonusAmount += bonusAmount;
                 
-                // ✅ Create a DEPOSIT transaction for tracking (type: 'deposit', isBonus: true)
                 wallet.transactions.push({
-                    type: 'deposit', // ✅ Type is 'deposit' not 'bonus'
+                    type: 'deposit',
                     amount: bonusAmount,
                     description: `${activeBonus.title} (${activeBonus.bonusPercentage}% on $${depositAmount})`,
                     status: 'completed',
-                    isBonus: true, // ✅ Flag it as bonus for tracking
+                    isBonus: true,
                     netAmount: bonusAmount,
                     balanceBefore: wallet.balance - bonusAmount,
                     balanceAfter: wallet.balance,
@@ -273,19 +258,46 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
             }
         }
 
-        // Update available balance
         wallet.updateAvailableBalance();
 
-        // ✅ Save wallet (single save to avoid version conflict)
+        // ✅ Save wallet BEFORE processing referral
         await wallet.save();
 
-        console.log('\n💰 Balance State AFTER:');
+        console.log('\n💰 Balance State AFTER Bonuses:');
         console.log('   Balance:', wallet.balance);
         console.log('   Bonus Balance:', wallet.bonusBalance);
         console.log('   Available:', wallet.availableBalance);
         console.log('   Pending:', wallet.pendingBalance);
 
-        // ✅ SEND TELEGRAM NOTIFICATION
+        // ✅ CRITICAL: PROCESS REFERRAL REWARD
+        let referralInfo = null;
+        try {
+            console.log('\n👥 Processing referral rewards...');
+            console.log(`   Calling processDepositReferral(${wallet.userId._id}, ${depositAmount})`);
+            
+            const referralResult = await processDepositReferral(wallet.userId._id, depositAmount);
+            
+            if (referralResult.success) {
+                referralInfo = {
+                    referrerUsername: referralResult.referrerUsername || 'User',
+                    rewardAmount: referralResult.rewardAmount,
+                    rewardType: referralResult.rewardType,
+                    depositNumber: referralResult.depositNumber,
+                    totalEarnings: referralResult.totalEarnings
+                };
+                console.log('   ✅ Referral reward processed successfully');
+                console.log(`      Referrer: ${referralInfo.referrerUsername}`);
+                console.log(`      Amount: $${referralInfo.rewardAmount}`);
+                console.log(`      Deposit #: ${referralInfo.depositNumber}`);
+            } else {
+                console.log('   ℹ️  No referral reward:', referralResult.message);
+            }
+        } catch (referralError) {
+            console.error('   ❌ Error processing referral:', referralError);
+            // Don't fail the deposit if referral processing fails
+        }
+
+        // Send Telegram notification
         console.log('\n📱 Sending Telegram notification...');
         await sendTelegramNotification({
             type: 'deposit_completed',
@@ -294,7 +306,8 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
             amount: depositAmount,
             paymentMethod: transaction.paymentMethod || 'Unknown',
             transactionId: transaction._id.toString(),
-            bonusInfo: bonusInfo
+            bonusInfo: bonusInfo,
+            referralInfo: referralInfo
         });
 
         console.log('\n✅ Deposit completed successfully');
@@ -304,6 +317,7 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
             success: true,
             transaction,
             bonusInfo,
+            referralInfo,
             wallet: {
                 userId: wallet.userId._id,
                 balance: wallet.balance,
