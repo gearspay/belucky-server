@@ -1,7 +1,8 @@
-// middleware/adminMiddleware.js
+// middleware/adminMiddleware.js - UPDATED TO SUPPORT STAFF
+
 const adminMiddleware = (req, res, next) => {
   try {
-    // Check if user exists and is admin (role = 1)
+    // Check if user exists
     if (!req.user) {
       return res.status(401).json({
         success: false,
@@ -9,10 +10,11 @@ const adminMiddleware = (req, res, next) => {
       });
     }
 
-    if (req.user.userRole !== 1) {
+    // ✅ Allow both Admin (role 1) and Staff (role 3)
+    if (![1, 3].includes(req.user.userRole)) {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. Admin privileges required.'
+        message: 'Access denied. Admin or Staff privileges required.'
       });
     }
 

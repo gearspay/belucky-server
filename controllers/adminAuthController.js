@@ -1,4 +1,4 @@
-// controllers/adminAuthController.js
+// controllers/adminAuthController.js - UPDATED WITH STAFF ROLE SUPPORT
 const User = require('../models/User');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
@@ -6,7 +6,6 @@ const jwt = require('jsonwebtoken');
 const adminLogin = async (req, res) => {
   const { username, password } = req.body;
 
-  // Validate input
   if (!username || !password) {
     return res.status(400).json({ 
       success: false,
@@ -15,33 +14,30 @@ const adminLogin = async (req, res) => {
   }
 
   try {
-    // Check if the admin exists - using case-insensitive search
     const lowercaseUsername = username.toLowerCase();
-    console.log('Admin login attempt for username:', lowercaseUsername);
+    console.log('Admin/Staff login attempt for username:', lowercaseUsername);
     
-    // Find admin user (role = 1) with case-insensitive username match
-    const admin = await User.findOne({ 
+    // ✅ Find admin (role 1) OR staff (role 3) users
+    const user = await User.findOne({ 
       username: { $regex: new RegExp(`^${lowercaseUsername}$`, 'i') },
-      role: 1 // Only admin users
+      role: { $in: [1, 3] } // Allow admin (1) and staff (3)
     });
     
-    if (!admin) {
+    if (!user) {
       return res.status(404).json({ 
         success: false,
-        message: 'Admin user not found or insufficient privileges' 
+        message: 'User not found or insufficient privileges' 
       });
     }
 
-    // Check if admin account is active
-    if (!admin.account.isActive) {
+    if (!user.account.isActive) {
       return res.status(403).json({
         success: false,
-        message: 'Admin account has been deactivated'
+        message: 'Account has been deactivated'
       });
     }
 
-    // Compare the password
-    const passwordCheck = await bcrypt.compare(password, admin.password);
+    const passwordCheck = await bcrypt.compare(password, user.password);
 
     if (!passwordCheck) {
       return res.status(400).json({ 
@@ -50,60 +46,62 @@ const adminLogin = async (req, res) => {
       });
     }
 
-    // Generate JWT token with admin flag
+    // ✅ Generate token with role information
     const token = jwt.sign(
       {
-        userId: admin._id,
-        userUsername: admin.username,
-        userRole: admin.role,
-        isAdmin: true
+        userId: user._id,
+        userUsername: user.username,
+        userRole: user.role,
+        isAdmin: user.role === 1,
+        isStaff: user.role === 3
       },
       process.env.JWT_SECRET || 'default_secret',
-      { expiresIn: '8h' } // Shorter session for admin security
+      { expiresIn: '8h' }
     );
 
-    // Update last login
-    await User.findByIdAndUpdate(admin._id, {
+    await User.findByIdAndUpdate(user._id, {
       'account.lastLogin': new Date()
     });
 
-    // Send success response
+    // ✅ Return role-specific information
+    const roleLabel = user.role === 1 ? 'Admin' : 'Staff';
+    
     res.status(200).json({
       success: true,
-      message: 'Admin login successful',
+      message: `${roleLabel} login successful`,
       data: {
         admin: {
-          _id: admin._id,
-          username: admin.username,
-          role: admin.role,
-          profile: admin.profile,
+          _id: user._id,
+          username: user.username,
+          role: user.role,
+          roleLabel: roleLabel,
+          profile: user.profile,
           lastLogin: new Date()
         },
         token
       }
     });
   } catch (error) {
-    console.error('Admin login error:', error);
+    console.error('Admin/Staff login error:', error);
     res.status(500).json({
       success: false,
-      message: 'Error logging in admin',
+      message: 'Error logging in',
       error: error.message,
     });
   }
 };
 
 const createAdmin = async (req, res) => {
-  const { username, password, email } = req.body;
+  const { username, password, email, role } = req.body;
 
-  // Only allow super admin (you can add additional checks here)
+  // Only allow super admin to create users
   if (req.user.userRole !== 1) {
     return res.status(403).json({
       success: false,
-      message: 'Insufficient privileges to create admin users'
+      message: 'Insufficient privileges to create admin/staff users'
     });
   }
 
-  // Validate input
   if (!username || !password) {
     return res.status(400).json({ 
       success: false,
@@ -111,7 +109,6 @@ const createAdmin = async (req, res) => {
     });
   }
 
-  // Username validation
   if (username.length < 3 || username.length > 20) {
     return res.status(400).json({ 
       success: false,
@@ -119,16 +116,23 @@ const createAdmin = async (req, res) => {
     });
   }
 
-  // Password validation
   if (password.length < 8) {
     return res.status(400).json({ 
       success: false,
-      message: 'Admin password must be at least 8 characters' 
+      message: 'Password must be at least 8 characters' 
+    });
+  }
+
+  // ✅ Validate role (1 = admin, 3 = staff)
+  const userRole = role || 1;
+  if (![1, 3].includes(userRole)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid role. Use 1 for Admin or 3 for Staff'
     });
   }
 
   try {
-    // Check if username already exists
     const existingUser = await User.findOne({ username: username.toLowerCase() });
     if (existingUser) {
       return res.status(409).json({ 
@@ -137,43 +141,41 @@ const createAdmin = async (req, res) => {
       });
     }
 
-    // Hash the password
-    const hashedPassword = await bcrypt.hash(password, 12); // Higher salt rounds for admin
+    const hashedPassword = await bcrypt.hash(password, 12);
 
-    // Create a new admin user instance
-    const admin = new User({
+    const newUser = new User({
       username: username.toLowerCase(),
       password: hashedPassword,
-      role: 1, // Admin role
+      role: userRole, // ✅ Set role from request
       'profile.email': email || '',
       'account.isActive': true
     });
 
-    // Save the new admin to the database
-    const result = await admin.save();
+    const result = await newUser.save();
 
-    // Don't send password back in response
-    const adminResponse = {
+    const roleLabel = userRole === 1 ? 'Admin' : 'Staff';
+
+    const userResponse = {
       _id: result._id,
       username: result.username,
       role: result.role,
+      roleLabel: roleLabel,
       profile: result.profile,
       createdAt: result.createdAt
     };
 
     res.status(201).json({
       success: true,
-      message: 'Admin user created successfully',
+      message: `${roleLabel} user created successfully`,
       data: {
-        admin: adminResponse
+        admin: userResponse
       }
     });
 
   } catch (error) {
-    console.error('Error creating admin:', error);
+    console.error('Error creating admin/staff:', error);
     
-    // Handle different types of errors
-    if (error.code === 11000) { // MongoDB duplicate key error
+    if (error.code === 11000) {
       return res.status(409).json({
         success: false,
         message: 'Username already exists',
@@ -182,7 +184,7 @@ const createAdmin = async (req, res) => {
 
     res.status(500).json({
       success: false,
-      message: 'Error creating admin user',
+      message: 'Error creating user',
       error: error.message,
     });
   }
@@ -190,28 +192,34 @@ const createAdmin = async (req, res) => {
 
 const getAdminProfile = async (req, res) => {
   try {
-    // Find admin user
-    const admin = await User.findById(req.user.userId).select('-password');
+    const user = await User.findById(req.user.userId).select('-password');
     
-    if (!admin || admin.role !== 1) {
+    // ✅ Allow both admin and staff
+    if (!user || ![1, 3].includes(user.role)) {
       return res.status(404).json({
         success: false,
-        message: 'Admin user not found'
+        message: 'User not found or insufficient privileges'
       });
     }
 
+    const roleLabel = user.role === 1 ? 'Admin' : 'Staff';
+
     res.status(200).json({
       success: true,
-      message: 'Admin profile retrieved successfully',
+      message: 'Profile retrieved successfully',
       data: {
-        admin
+        username: user.username,
+        role: user.role,
+        roleLabel: roleLabel,
+        profile: user.profile,
+        account: user.account
       }
     });
   } catch (error) {
-    console.error('Error getting admin profile:', error);
+    console.error('Error getting profile:', error);
     res.status(500).json({
       success: false,
-      message: 'Error retrieving admin profile',
+      message: 'Error retrieving profile',
       error: error.message
     });
   }
@@ -221,7 +229,6 @@ const changeAdminPassword = async (req, res) => {
   const userId = req.user.userId;
   const { oldPassword, newPassword } = req.body;
 
-  // Validate inputs
   if (!oldPassword || !newPassword) {
     return res.status(400).json({
       success: false,
@@ -237,17 +244,20 @@ const changeAdminPassword = async (req, res) => {
   }
 
   try {
-    // Find admin user
-    const admin = await User.findOne({ _id: userId, role: 1 });
-    if (!admin) {
+    // ✅ Allow both admin and staff to change their password
+    const user = await User.findOne({ 
+      _id: userId, 
+      role: { $in: [1, 3] }
+    });
+    
+    if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'Admin user not found'
+        message: 'User not found'
       });
     }
 
-    // Verify old password
-    const isPasswordCorrect = await bcrypt.compare(oldPassword, admin.password);
+    const isPasswordCorrect = await bcrypt.compare(oldPassword, user.password);
     if (!isPasswordCorrect) {
       return res.status(400).json({
         success: false,
@@ -255,24 +265,22 @@ const changeAdminPassword = async (req, res) => {
       });
     }
 
-    // Hash new password with higher salt rounds
     const hashedPassword = await bcrypt.hash(newPassword, 12);
 
-    // Update password
     await User.findByIdAndUpdate(userId, {
       password: hashedPassword
     });
 
     res.status(200).json({
       success: true,
-      message: 'Admin password updated successfully'
+      message: 'Password updated successfully'
     });
 
   } catch (error) {
-    console.error('Error changing admin password:', error);
+    console.error('Error changing password:', error);
     res.status(500).json({
       success: false,
-      message: 'Error updating admin password',
+      message: 'Error updating password',
       error: error.message
     });
   }
@@ -283,8 +291,9 @@ const updateAdminProfile = async (req, res) => {
   const { firstName, lastName, email, phone } = req.body;
 
   try {
-    const admin = await User.findOneAndUpdate(
-      { _id: userId, role: 1 }, // Ensure it's an admin
+    // ✅ Allow both admin and staff to update profile
+    const user = await User.findOneAndUpdate(
+      { _id: userId, role: { $in: [1, 3] } },
       {
         'profile.firstName': firstName,
         'profile.lastName': lastName,
@@ -294,25 +303,25 @@ const updateAdminProfile = async (req, res) => {
       { new: true, runValidators: true, select: '-password' }
     );
 
-    if (!admin) {
+    if (!user) {
       return res.status(404).json({
         success: false,
-        message: 'Admin user not found'
+        message: 'User not found'
       });
     }
 
     res.status(200).json({
       success: true,
-      message: 'Admin profile updated successfully',
+      message: 'Profile updated successfully',
       data: {
-        admin
+        admin: user
       }
     });
   } catch (error) {
-    console.error('Error updating admin profile:', error);
+    console.error('Error updating profile:', error);
     res.status(500).json({
       success: false,
-      message: 'Error updating admin profile',
+      message: 'Error updating profile',
       error: error.message
     });
   }
