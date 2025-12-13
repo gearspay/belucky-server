@@ -261,38 +261,36 @@ walletSchema.methods.addTransaction = function(transactionData) {
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     console.log(`💳 WALLET TRANSACTION`);
     console.log(`Type: ${transactionData.type}`);
-    console.log(`Amount: $${transactionData.amount}`);
+    console.log(`Amount: ${transactionData.amount}`);
     console.log(`Is Bonus: ${transactionData.isBonus ? 'YES ✓' : 'NO ✗'}`);
     console.log(`Status: ${transactionData.status || 'pending'}`);
-    console.log(`Balance Before: $${balanceBefore}`);
-    console.log(`Bonus Balance Before: $${bonusBalanceBefore}`);
+    console.log(`Balance Before: ${balanceBefore}`);
+    console.log(`Bonus Balance Before: ${bonusBalanceBefore}`);
     
-    // ✅ Update balance based on transaction type
+    // ✅ Calculate balanceAfter (but don't apply yet for pending withdrawals/game_deposits)
     if (['deposit', 'game_withdrawal', 'refund'].includes(transactionData.type)) {
         // These add to REGULAR balance only
         balanceAfter = balanceBefore + netAmount;
-        console.log(`➕ Adding $${netAmount} to REGULAR balance`);
+        console.log(`➕ Will add ${netAmount} to REGULAR balance`);
     } else if (transactionData.type === 'bonus') {
         // Bonus type adds to BONUS balance
         bonusBalanceAfter = bonusBalanceBefore + netAmount;
-        console.log(`➕ Adding $${netAmount} to BONUS balance`);
+        console.log(`➕ Will add ${netAmount} to BONUS balance`);
     } else if (['withdrawal', 'game_deposit'].includes(transactionData.type)) {
         // ✅ Check if using bonus balance for game_deposit
         if (transactionData.type === 'game_deposit' && transactionData.isBonus === true) {
-            // Deduct from BONUS balance
+            // Deduct from BONUS balance IMMEDIATELY (no pending lock for bonus)
             bonusBalanceAfter = Math.max(0, bonusBalanceBefore - transactionData.amount);
-            console.log(`➖ Deducting $${transactionData.amount} from BONUS balance`);
-            console.log(`   Bonus Balance After: $${bonusBalanceAfter}`);
+            console.log(`➖ Will deduct ${transactionData.amount} from BONUS balance`);
         } else {
-            // Deduct from REGULAR balance
+            // For regular balance - will deduct but only through pending mechanism
             balanceAfter = Math.max(0, balanceBefore - transactionData.amount);
-            console.log(`➖ Deducting $${transactionData.amount} from REGULAR balance`);
-            console.log(`   Balance After: $${balanceAfter}`);
+            console.log(`➖ Will lock ${transactionData.amount} in PENDING (balance stays at ${balanceBefore})`);
         }
     }
     
-    console.log(`Final Balance After: $${balanceAfter}`);
-    console.log(`Final Bonus Balance After: $${bonusBalanceAfter}`);
+    console.log(`Calculated Balance After: ${balanceAfter}`);
+    console.log(`Calculated Bonus Balance After: ${bonusBalanceAfter}`);
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     
     const transaction = {
@@ -307,8 +305,9 @@ walletSchema.methods.addTransaction = function(transactionData) {
     
     this.transactions.push(transaction);
     
-    // ✅ Update wallet balances IMMEDIATELY if transaction is completed
+    // ✅ Update wallet balances based on status and type
     if (transaction.status === 'completed') {
+        // Apply the calculated balances immediately
         this.balance = balanceAfter;
         this.bonusBalance = bonusBalanceAfter;
         this.updateAvailableBalance();
@@ -318,19 +317,27 @@ walletSchema.methods.addTransaction = function(transactionData) {
         }
         
         console.log(`✅ Wallet balances updated (completed):`);
-        console.log(`   Regular Balance: $${this.balance}`);
-        console.log(`   Bonus Balance: $${this.bonusBalance}`);
-        console.log(`   Available Balance: $${this.availableBalance}`);
-        console.log(`   Available Bonus Balance: $${this.availableBonusBalance}`);
-    } else if (transaction.status === 'pending' && 
-               ['withdrawal', 'game_deposit'].includes(transactionData.type)) {
-        // Lock pending amounts (only from regular balance)
-        if (!transactionData.isBonus) {
-            this.pendingBalance += transactionData.amount;
+        console.log(`   Regular Balance: ${this.balance}`);
+        console.log(`   Bonus Balance: ${this.bonusBalance}`);
+        console.log(`   Available Balance: ${this.availableBalance}`);
+        console.log(`   Available Bonus Balance: ${this.availableBonusBalance}`);
+    } else if (transaction.status === 'pending') {
+        if (['withdrawal', 'game_deposit'].includes(transactionData.type)) {
+            if (transactionData.isBonus) {
+                // Bonus: deduct immediately, no pending lock
+                this.bonusBalance = bonusBalanceAfter;
+                console.log(`⏳ Bonus deducted immediately: ${this.bonusBalance}`);
+            } else {
+                // Regular: lock in pending, balance stays same
+                this.pendingBalance += transactionData.amount;
+                console.log(`⏳ Locked ${transactionData.amount} as pending`);
+                console.log(`   Balance remains: ${this.balance}`);
+                console.log(`   Pending: ${this.pendingBalance}`);
+            }
             this.updateAvailableBalance();
-            console.log(`⏳ Locked $${transactionData.amount} as pending (regular balance)`);
-        } else {
-            console.log(`⏳ Pending bonus transaction - no lock needed`);
+        } else if (['deposit', 'game_withdrawal', 'refund'].includes(transactionData.type)) {
+            // Deposits stay pending - don't update balance yet
+            console.log(`⏳ Deposit pending - balance will update when completed`);
         }
     }
     
@@ -352,6 +359,7 @@ walletSchema.methods.getLastGameDeposit = function(gameAccountId) {
     return deposits.length > 0 ? deposits[0] : null;
 };
 
+// ✅ FIXED: Method to update transaction status
 // ✅ FIXED: Method to update transaction status
 walletSchema.methods.updateTransactionStatus = function(transactionId, status, notes) {
     const transaction = this.transactions.id(transactionId);
@@ -375,52 +383,50 @@ walletSchema.methods.updateTransactionStatus = function(transactionId, status, n
     
     // ✅ Handle balance updates based on status change
     if (oldStatus === 'pending' && status === 'completed') {
-        // For deposits/credits - ADD to balance
+        // For deposits/credits - ADD to balance (they were pending, now completed)
         if (['deposit', 'game_withdrawal', 'bonus', 'refund'].includes(transaction.type)) {
             if (transaction.type === 'bonus') {
                 this.bonusBalance += transaction.netAmount;
-                console.log(`➕ Added $${transaction.netAmount} to bonus balance`);
+                console.log(`➕ Added ${transaction.netAmount} to bonus balance`);
             } else {
                 this.balance += transaction.netAmount;
-                console.log(`➕ Added $${transaction.netAmount} to regular balance`);
+                console.log(`➕ Added ${transaction.netAmount} to regular balance`);
             }
         }
         
-        // For withdrawals/debits - Just release from pending (already deducted)
+        // ✅ For withdrawals/game_deposits - FINALIZE the deduction (release from pending, balance stays deducted)
         if (['withdrawal', 'game_deposit'].includes(transaction.type)) {
             if (!transaction.isBonus) {
+                // Regular balance: was locked in pending, now just release from pending
+                // The balance was ALREADY deducted in addTransaction
+                this.balance = transaction.balanceAfter; // Apply the calculated balanceAfter
                 this.pendingBalance = Math.max(0, this.pendingBalance - transaction.amount);
-                console.log(`🔓 Released $${transaction.amount} from pending (balance already deducted)`);
+                console.log(`✅ Finalized deduction: Balance=$${this.balance}, Released from pending=$${transaction.amount}`);
             } else {
-                console.log(`✅ Bonus transaction completed (no pending lock)`);
+                // Bonus was deducted immediately, no pending
+                console.log(`✅ Bonus transaction completed (was already deducted)`);
             }
         }
         
         transaction.completedAt = new Date();
     } 
     else if (oldStatus === 'pending' && ['failed', 'cancelled'].includes(status)) {
-        // ✅ ROLLBACK: Refund the deducted amount
+        // ✅ ROLLBACK: Handle refunds based on transaction type
         if (['withdrawal', 'game_deposit'].includes(transaction.type)) {
             if (transaction.isBonus) {
-                // Refund to bonus balance
+                // Bonus was deducted directly - refund to bonus balance
                 this.bonusBalance += transaction.amount;
-                console.log(`↩️  Refunded $${transaction.amount} to bonus balance`);
+                console.log(`↩️  Refunded ${transaction.amount} to bonus balance`);
             } else {
-                // Release from pending AND refund to balance
+                // Regular balance: restore the balance and release from pending
+                this.balance = transaction.balanceBefore; // Restore to original balance
                 this.pendingBalance = Math.max(0, this.pendingBalance - transaction.amount);
-                this.balance += transaction.amount;
-                console.log(`↩️  Released $${transaction.amount} from pending and refunded to balance`);
+                console.log(`↩️  Refunded ${transaction.amount} to regular balance (was in pending)`);
             }
         }
-        // If it was a deposit that failed, remove the added amount
-        else if (['deposit', 'game_withdrawal', 'refund'].includes(transaction.type)) {
-            if (transaction.type === 'bonus') {
-                this.bonusBalance = Math.max(0, this.bonusBalance - transaction.netAmount);
-                console.log(`↩️  Removed $${transaction.netAmount} from bonus balance`);
-            } else {
-                this.balance = Math.max(0, this.balance - transaction.netAmount);
-                console.log(`↩️  Removed $${transaction.netAmount} from regular balance`);
-            }
+        // If it was a deposit/credit that failed, don't add anything (it was never added)
+        else if (['deposit', 'game_withdrawal', 'refund', 'bonus'].includes(transaction.type)) {
+            console.log(`↩️  Deposit/credit failed - nothing to refund (was never added)`);
         }
     }
     

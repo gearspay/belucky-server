@@ -94,15 +94,15 @@ router.get('/withdrawals', (req, res) => {
 // GAME TRANSFER ROUTES
 // ============================================
 
-// @route   POST /api/user/transfer-to-game
-// @desc    Transfer funds to game account
-// @access  Private
-router.post('/transfer-to-game', walletController.transferToGame);
+// // @route   POST /api/user/transfer-to-game
+// // @desc    Transfer funds to game account
+// // @access  Private
+// router.post('/transfer-to-game', walletController.transferToGame);
 
-// @route   POST /api/user/transfer-from-game
-// @desc    Transfer funds from game account
-// @access  Private
-router.post('/transfer-from-game', walletController.transferFromGame);
+// // @route   POST /api/user/transfer-from-game
+// // @desc    Transfer funds from game account
+// // @access  Private
+// router.post('/transfer-from-game', walletController.transferFromGame);
 
 // ============================================
 // ADDITIONAL USER ROUTES (if needed)

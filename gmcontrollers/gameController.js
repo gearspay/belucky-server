@@ -242,17 +242,26 @@ const getAccountBalance = async (req, res) => {
   }
 };
 
+
 const rechargeAccount = async (req, res) => {
+  // ✅ IMMEDIATE LOGGING - This should ALWAYS appear if function is called
+  console.log('\n');
+  console.log('═══════════════════════════════════════════');
+  console.log('🚀 RECHARGE ACCOUNT FUNCTION CALLED');
+  console.log('Time:', new Date().toISOString());
+  console.log('User:', req.user?.userId || 'NO USER');
+  console.log('Params:', JSON.stringify(req.params));
+  console.log('Body:', JSON.stringify(req.body));
+  console.log('═══════════════════════════════════════════');
+  
   let transactionId = null;
   let walletTransactionId = null;
-  let walletDeducted = false;
   let gameRecharged = false;
   let clientDisconnected = false;
 
-  // ✅ Detect if client disconnects (page refresh/close)
   req.on('close', () => {
     if (!res.headersSent) {
-      console.log('⚠️ CLIENT DISCONNECTED - Request aborted');
+      console.log('⚠️ CLIENT DISCONNECTED');
       clientDisconnected = true;
     }
   });
@@ -263,14 +272,10 @@ const rechargeAccount = async (req, res) => {
     const { amount, remark, isBonus } = req.body;
 
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`📥 RECHARGE REQUEST RECEIVED`);
-    console.log(`User: ${userId}`);
-    console.log(`Account: ${accountId}`);
-    console.log(`Amount: $${amount}`);
-    console.log(`Is Bonus: ${isBonus}`);
+    console.log(`📥 RECHARGE REQUEST`);
+    console.log(`Amount: $${amount}, isBonus: ${isBonus}`);
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-    // Validate integer
     if (!amount || amount <= 0 || !Number.isInteger(amount)) {
       return res.status(400).json({
         success: false,
@@ -298,90 +303,173 @@ const rechargeAccount = async (req, res) => {
       });
     }
 
-    // ✅ CHECK FOR EXISTING PENDING TRANSACTIONS
-    const existingPending = gameAccount.transactions.find(
+    // ✅ ALSO CHECK AND CLEAN WALLET PENDING TRANSACTIONS
+    const Wallet = require('../models/Wallet');
+    const userWallet = await Wallet.findOne({ userId });
+    if (userWallet) {
+      const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
+      const pendingWalletTxs = userWallet.transactions.filter(
+        t => t.type === 'game_deposit' && 
+             t.status === 'pending' &&
+             t.gameDetails?.gameAccountId?.toString() === accountId.toString()
+      );
+
+      if (pendingWalletTxs.length > 0) {
+        console.log(`\n🔍 Found ${pendingWalletTxs.length} pending WALLET transaction(s) for this game account`);
+        
+        for (const walletTx of pendingWalletTxs) {
+          const txAge = new Date(walletTx.createdAt);
+          const ageInSeconds = Math.floor((Date.now() - txAge.getTime()) / 1000);
+          
+          if (txAge <= thirtySecondsAgo) {
+            console.log(`🔄 Auto-failing OLD wallet transaction (${ageInSeconds}s old):`, walletTx._id);
+            
+            walletTx.status = 'failed';
+            walletTx.metadata = walletTx.metadata || {};
+            walletTx.metadata.autoFailed = true;
+            walletTx.metadata.failureReason = `Auto-failed - stuck for ${ageInSeconds} seconds`;
+            
+            // Release pending balance
+            if (!walletTx.isBonus) {
+              userWallet.pendingBalance = Math.max(0, userWallet.pendingBalance - walletTx.amount);
+              console.log(`   ↩️  Released $${walletTx.amount} from pending`);
+            } else {
+              userWallet.bonusBalance += walletTx.amount;
+              console.log(`   ↩️  Refunded $${walletTx.amount} to bonus balance`);
+            }
+          }
+        }
+        
+        userWallet.updateAvailableBalance();
+        await userWallet.save();
+        console.log('✅ Old wallet transactions cleaned up\n');
+      }
+    }
+
+    // ✅ CHECK FOR PENDING GAME TRANSACTIONS
+    const thirtySecondsAgo = new Date(Date.now() - 30 * 1000);
+    const pendingTransactions = gameAccount.transactions.filter(
       t => t.type === 'recharge' && t.status === 'pending'
     );
 
-    if (existingPending) {
-      console.log('⚠️ Found existing pending transaction:', existingPending._id);
-      return res.status(409).json({
-        success: false,
-        message: 'A recharge is already in progress. Please wait or refresh.',
-        pendingTransactionId: existingPending._id
-      });
+    if (pendingTransactions.length > 0) {
+      console.log(`\n🔍 Found ${pendingTransactions.length} pending transaction(s)`);
+      
+      let hasRecentPending = false;
+      
+      for (const pendingTx of pendingTransactions) {
+        const txAge = new Date(pendingTx.createdAt);
+        const ageInSeconds = Math.floor((Date.now() - txAge.getTime()) / 1000);
+        
+        console.log(`📋 Checking transaction ${pendingTx._id}:`);
+        console.log(`   - Created: ${pendingTx.createdAt}`);
+        console.log(`   - Age: ${ageInSeconds} seconds`);
+        console.log(`   - Status: ${pendingTx.status}`);
+        
+        if (txAge > thirtySecondsAgo) {
+          // Recent pending (less than 30 seconds old) - BLOCK
+          hasRecentPending = true;
+          console.log(`   ⚠️ BLOCKING: Too recent (${ageInSeconds}s < 30s)`);
+        } else {
+          // Old pending (more than 30 seconds old) - MARK AS FAILED
+          console.log(`   🔄 AUTO-FAILING: Too old (${ageInSeconds}s >= 30s)`);
+          
+          pendingTx.status = 'failed';
+          pendingTx.metadata = pendingTx.metadata || {};
+          pendingTx.metadata.autoFailed = true;
+          pendingTx.metadata.failureReason = `Auto-failed - stuck for ${ageInSeconds} seconds`;
+          pendingTx.failedAt = new Date();
+          
+          // Rollback wallet transaction if exists
+          if (pendingTx.walletTransactionId) {
+            try {
+              const userWalletForRollback = await Wallet.findOne({ userId });
+              if (userWalletForRollback) {
+                const walletTx = userWalletForRollback.transactions.id(pendingTx.walletTransactionId);
+                if (walletTx && walletTx.status === 'pending') {
+                  walletTx.status = 'failed';
+                  walletTx.failedAt = new Date();
+                  await userWalletForRollback.save();
+                  console.log(`   ✅ Rolled back wallet transaction: ${pendingTx.walletTransactionId}`);
+                }
+              }
+            } catch (err) {
+              console.error('   ❌ Failed to rollback wallet transaction:', err);
+            }
+          }
+        }
+      }
+      
+      // Save the failed transactions
+      await gameAccount.save();
+      
+      // If there's a RECENT pending, block the request
+      if (hasRecentPending) {
+        return res.status(409).json({
+          success: false,
+          message: 'A recharge is already in progress. Please wait 30 seconds and try again.'
+        });
+      }
+      
+      console.log('✅ Old pending transactions marked as failed. Proceeding with new recharge...\n');
     }
 
     const { game, controller } = await loadGameController(slug);
     const isBonusDeposit = isBonus === true;
-
-    // Calculate amounts
     const bonusAmount = Math.floor(amount * 0.1);
     const totalAmountToGame = amount + bonusAmount;
 
-    console.log(`💰 RECHARGE CALCULATION`);
-    console.log(`Wallet Deduction: $${amount} from ${isBonusDeposit ? 'BONUS' : 'REGULAR'}`);
-    console.log(`Game Bonus (10%): +$${bonusAmount}`);
-    console.log(`Total to Game: $${totalAmountToGame}`);
+    console.log(`💰 Calculation: $${amount} + $${bonusAmount} bonus = $${totalAmountToGame} to game`);
 
-    // ✅ STEP 1: GET WALLET AND CHECK BALANCE
-    console.log('\n📤 Step 1: Checking wallet balance...');
+    // ✅ STEP 1: CHECK WALLET BALANCE FIRST
+    console.log('\n💳 Checking wallet balance...');
+    const wallet = await Wallet.findOrCreateWallet(userId);
     
-    const Wallet = require('../models/Wallet');
-    const userWallet = await Wallet.findOne({ userId });
-
-    if (!userWallet) {
-      throw new Error('Wallet not found');
+    if (isBonusDeposit) {
+      if (wallet.availableBonusBalance < amount) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient bonus balance. Available: $${wallet.availableBonusBalance.toFixed(2)}`
+        });
+      }
+      console.log(`✅ Bonus balance sufficient: $${wallet.availableBonusBalance} >= $${amount}`);
+    } else {
+      if (wallet.availableBalance < amount) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient balance. Available: $${wallet.availableBalance.toFixed(2)}`
+        });
+      }
+      console.log(`✅ Regular balance sufficient: $${wallet.availableBalance} >= $${amount}`);
     }
 
-    // Check sufficient balance
-    const sufficientBalance = isBonusDeposit 
-      ? userWallet.bonusBalance >= amount
-      : userWallet.balance >= amount;
-
-    if (!sufficientBalance) {
-      return res.status(400).json({
-        success: false,
-        message: `Insufficient ${isBonusDeposit ? 'bonus' : 'regular'} balance. Available: $${isBonusDeposit ? userWallet.bonusBalance : userWallet.balance}`
-      });
-    }
-
-    // ✅ STEP 2: CREATE WALLET TRANSACTION (PENDING) - This will deduct balance
-    console.log('\n📝 Step 2: Creating wallet transaction...');
-    
-    const walletTransaction = userWallet.addTransaction({
+    // ✅ STEP 2: CREATE WALLET TRANSACTION (pending)
+    console.log('\n💳 Creating wallet transaction (pending)...');
+    const walletTransaction = wallet.addTransaction({
       type: 'game_deposit',
-      amount: amount,
-      description: `Transfer to ${game.name}${isBonusDeposit ? ' (Bonus)' : ''}`,
+      amount,
+      description: remark || `Deposit to ${gameAccount.gameType}${isBonusDeposit ? ' (Bonus)' : ''}`,
       status: 'pending',
       isBonus: isBonusDeposit,
       gameDetails: {
-        gameType: game.gameType,
-        gameAccountId: accountId,
-        gameLogin: gameAccount.gameLogin
+        gameType: gameAccount.gameType,
+        gameLogin: gameAccount.gameLogin,
+        gameAccountId: gameAccount._id
       },
+      referenceId: gameAccount._id,
       metadata: {
-        gameBonus: bonusAmount,
-        totalToGame: totalAmountToGame,
-        walletSource: isBonusDeposit ? 'bonus' : 'regular'
+        sourceBalance: isBonusDeposit ? 'bonus' : 'regular',
+        requestedAt: new Date()
       }
     });
-
-    await userWallet.save();
+    
+    await wallet.save();
     walletTransactionId = walletTransaction._id;
-    walletDeducted = true;
+    console.log(`✅ Wallet transaction created: ${walletTransactionId}`);
+    console.log(`   Balance locked: ${isBonusDeposit ? 'Bonus' : 'Regular'} $${amount}`);
 
-    console.log('✅ Wallet transaction created:', walletTransactionId);
-    console.log(`   Wallet balance ${isBonusDeposit ? 'bonus' : 'regular'}: $${isBonusDeposit ? userWallet.bonusBalance : userWallet.balance}`);
-
-    // ✅ CHECK IF CLIENT DISCONNECTED AFTER WALLET DEDUCTION
-    if (clientDisconnected) {
-      console.log('🚫 Client disconnected after wallet deduction - rolling back');
-      throw new Error('Request cancelled by client');
-    }
-
-    // ✅ STEP 3: CREATE GAME TRANSACTION (LINKED TO WALLET)
-    console.log('\n📝 Step 3: Creating game transaction...');
+    // ✅ STEP 3: CREATE GAME TRANSACTION
+    console.log('\n📝 Creating game transaction...');
     
     const gameTransaction = {
       type: 'recharge',
@@ -404,14 +492,12 @@ const rechargeAccount = async (req, res) => {
 
     console.log('✅ Game transaction created:', transactionId);
 
-    // ✅ CHECK CLIENT AGAIN BEFORE PUPPETEER
     if (clientDisconnected) {
-      console.log('🚫 Client disconnected before Puppeteer - rolling back');
       throw new Error('Request cancelled by client');
     }
 
-    // ✅ STEP 4: CALL GAME CONTROLLER WITH TIMEOUT
-    console.log('\n🎮 Step 4: Calling game controller...');
+    // ✅ CALL GAME CONTROLLER WITH TIMEOUT
+    console.log('\n🎮 Calling game controller...');
     
     const puppeteerPromise = controller.rechargeAccount(
       userId, 
@@ -422,47 +508,29 @@ const rechargeAccount = async (req, res) => {
     );
 
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Game recharge timeout after 30 seconds')), 30000);
+      setTimeout(() => reject(new Error('Timeout after 30 seconds')), 30000);
     });
 
     const result = await Promise.race([puppeteerPromise, timeoutPromise]);
 
-    // ✅ CHECK IF CLIENT DISCONNECTED DURING PUPPETEER
-    if (clientDisconnected) {
-      console.log('⚠️ Client disconnected during Puppeteer operation');
+    if (clientDisconnected && result.success) {
+      gameRecharged = true;
+      const updatedGameAccount = await GameAccount.findById(accountId);
+      const recentTransaction = updatedGameAccount.transactions.id(transactionId);
       
-      if (result.success) {
-        // Game was charged but client disconnected
-        gameRecharged = true;
-        
-        // Mark game transaction as completed
-        const updatedGameAccount = await GameAccount.findById(accountId);
-        const recentTransaction = updatedGameAccount.transactions.id(transactionId);
-        
-        if (recentTransaction) {
-          recentTransaction.status = 'completed';
-          recentTransaction.completedAt = new Date();
-          recentTransaction.processedAt = new Date();
-          recentTransaction.metadata.completedDespiteDisconnect = true;
-          await updatedGameAccount.save();
-        }
-
-        // Mark wallet transaction as completed
-        const updatedWallet = await Wallet.findOne({ userId });
-        updatedWallet.updateTransactionStatus(walletTransactionId, 'completed');
-        await updatedWallet.save();
-
-        console.log('✅ Transaction completed despite client disconnect');
-        return; // Don't send response - client is gone
-      } else {
-        throw new Error('Client disconnected and game recharge failed');
+      if (recentTransaction) {
+        recentTransaction.status = 'completed';
+        recentTransaction.completedAt = new Date();
+        await updatedGameAccount.save();
       }
+
+      console.log('✅ Completed despite disconnect');
+      return;
     }
 
     if (result.success) {
       gameRecharged = true;
 
-      // ✅ Mark game transaction as completed
       const updatedGameAccount = await GameAccount.findById(accountId);
       const recentTransaction = updatedGameAccount.transactions.id(transactionId);
       
@@ -473,16 +541,17 @@ const rechargeAccount = async (req, res) => {
         await updatedGameAccount.save();
       }
 
-      // ✅ Mark wallet transaction as completed
+      // ✅ COMPLETE WALLET TRANSACTION
       const updatedWallet = await Wallet.findOne({ userId });
       updatedWallet.updateTransactionStatus(walletTransactionId, 'completed');
       await updatedWallet.save();
 
-      console.log('✅ All transactions completed successfully');
+      console.log('✅ Game recharge completed');
+      console.log('✅ Wallet transaction completed');
 
       return res.json({
         success: true,
-        message: `Recharge completed${isBonusDeposit ? ' (Bonus Balance Used)' : ''}`,
+        message: `Recharge completed${isBonusDeposit ? ' (Bonus)' : ''}`,
         data: {
           ...result.data,
           transactionId: recentTransaction?._id,
@@ -500,32 +569,9 @@ const rechargeAccount = async (req, res) => {
 
   } catch (error) {
     console.error('❌ RECHARGE FAILED:', error.message);
-
     const failureReason = clientDisconnected ? 'cancelled' : 'failed';
-    
-    // ✅ ROLLBACK LOGIC
-    if (walletDeducted && !gameRecharged) {
-      console.log(`🔄 Rolling back wallet transaction (${failureReason})...`);
-      
-      try {
-        const Wallet = require('../models/Wallet');
-        const updatedWallet = await Wallet.findOne({ userId: req.user.userId });
-        
-        if (updatedWallet && walletTransactionId) {
-          // ✅ Use the Wallet's built-in method to update status
-          // This will automatically refund the balance
-          updatedWallet.updateTransactionStatus(walletTransactionId, failureReason);
-          await updatedWallet.save();
-          
-          console.log(`✅ Wallet transaction marked as ${failureReason} and balance refunded`);
-        }
-      } catch (rollbackError) {
-        console.error('❌ CRITICAL: Rollback failed!', rollbackError);
-        // TODO: Log to monitoring system, alert admins
-      }
-    }
 
-    // ✅ Mark game transaction as failed/cancelled
+    // ✅ Mark game transaction as failed
     if (transactionId) {
       try {
         const updatedGameAccount = await GameAccount.findById(req.params.accountId);
@@ -534,24 +580,33 @@ const rechargeAccount = async (req, res) => {
         if (failedTx) {
           failedTx.status = failureReason;
           failedTx.metadata.failureReason = error.message;
-          failedTx.metadata.failureType = failureReason;
-          failedTx[`${failureReason}At`] = new Date();
           await updatedGameAccount.save();
-          
-          console.log(`✅ Game transaction marked as ${failureReason}`);
         }
       } catch (updateError) {
-        console.error('Failed to update game transaction status:', updateError);
+        console.error('Failed to update game transaction:', updateError);
       }
     }
 
-    // Only send response if client is still connected
+    // ✅ Rollback wallet transaction
+    if (walletTransactionId) {
+      try {
+        const Wallet = require('../models/Wallet');
+        const updatedWallet = await Wallet.findOne({ userId: req.user.userId });
+        if (updatedWallet) {
+          updatedWallet.updateTransactionStatus(walletTransactionId, failureReason, error.message);
+          await updatedWallet.save();
+          console.log(`✅ Wallet transaction rolled back: ${walletTransactionId}`);
+        }
+      } catch (rollbackError) {
+        console.error('Failed to rollback wallet transaction:', rollbackError);
+      }
+    }
+
     if (!clientDisconnected && !res.headersSent) {
       return res.status(400).json({
         success: false,
         message: error.message || 'Recharge failed',
-        status: failureReason,
-        rolledBack: walletDeducted && !gameRecharged
+        status: failureReason
       });
     }
   }

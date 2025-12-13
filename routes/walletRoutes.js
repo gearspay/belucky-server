@@ -52,15 +52,15 @@ router.post('/deposit', depositFunds);
 // @access  Private
 router.post('/withdraw', withdrawFunds);
 
-// @route   POST /api/wallet/transfer-to-game
-// @desc    Transfer funds from wallet to game account (supports bonus balance with useBonus flag)
-// @access  Private
-router.post('/transfer-to-game', transferToGame);
+// // @route   POST /api/wallet/transfer-to-game
+// // @desc    Transfer funds from wallet to game account (supports bonus balance with useBonus flag)
+// // @access  Private
+// router.post('/transfer-to-game', transferToGame);
 
-// @route   POST /api/wallet/transfer-from-game
-// @desc    Transfer funds from game account to wallet (applies 10% rule for bonus deposits)
-// @access  Private
-router.post('/transfer-from-game', transferFromGame);
+// // @route   POST /api/wallet/transfer-from-game
+// // @desc    Transfer funds from game account to wallet (applies 10% rule for bonus deposits)
+// // @access  Private
+// router.post('/transfer-from-game', transferFromGame);
 
 // @route   GET /api/wallet/transactions
 // @desc    Get transaction history with pagination and filters (includes bonus transactions)
