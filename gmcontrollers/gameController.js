@@ -243,10 +243,24 @@ const getAccountBalance = async (req, res) => {
 };
 
 const rechargeAccount = async (req, res) => {
+  let transactionId = null;
+  let walletTransactionId = null;
+  let walletDeducted = false;
+  let gameRecharged = false;
+  let clientDisconnected = false;
+
+  // ✅ Detect if client disconnects (page refresh/close)
+  req.on('close', () => {
+    if (!res.headersSent) {
+      console.log('⚠️ CLIENT DISCONNECTED - Request aborted');
+      clientDisconnected = true;
+    }
+  });
+
   try {
     const userId = req.user.userId;
     const { slug, accountId } = req.params;
-    const { amount, remark, isBonus } = req.body; // ✅ Accept isBonus flag
+    const { amount, remark, isBonus } = req.body;
 
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     console.log(`📥 RECHARGE REQUEST RECEIVED`);
@@ -254,10 +268,9 @@ const rechargeAccount = async (req, res) => {
     console.log(`Account: ${accountId}`);
     console.log(`Amount: $${amount}`);
     console.log(`Is Bonus: ${isBonus}`);
-    console.log(`Remark: ${remark}`);
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-    // ✅ Validate integer
+    // Validate integer
     if (!amount || amount <= 0 || !Number.isInteger(amount)) {
       return res.status(400).json({
         success: false,
@@ -285,28 +298,98 @@ const rechargeAccount = async (req, res) => {
       });
     }
 
-    const { game, controller } = await loadGameController(slug);
+    // ✅ CHECK FOR EXISTING PENDING TRANSACTIONS
+    const existingPending = gameAccount.transactions.find(
+      t => t.type === 'recharge' && t.status === 'pending'
+    );
 
+    if (existingPending) {
+      console.log('⚠️ Found existing pending transaction:', existingPending._id);
+      return res.status(409).json({
+        success: false,
+        message: 'A recharge is already in progress. Please wait or refresh.',
+        pendingTransactionId: existingPending._id
+      });
+    }
+
+    const { game, controller } = await loadGameController(slug);
     const isBonusDeposit = isBonus === true;
 
-    // ✅ Calculate bonus (always 10% to game)
+    // Calculate amounts
     const bonusAmount = Math.floor(amount * 0.1);
     const totalAmountToGame = amount + bonusAmount;
 
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     console.log(`💰 RECHARGE CALCULATION`);
-    console.log(`Wallet Deduction: $${amount} from ${isBonusDeposit ? 'BONUS' : 'REGULAR'} balance`);
+    console.log(`Wallet Deduction: $${amount} from ${isBonusDeposit ? 'BONUS' : 'REGULAR'}`);
     console.log(`Game Bonus (10%): +$${bonusAmount}`);
     console.log(`Total to Game: $${totalAmountToGame}`);
-    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-    // ✅ Create transaction record with isBonus flag IMMEDIATELY
-    const transaction = {
+    // ✅ STEP 1: GET WALLET AND CHECK BALANCE
+    console.log('\n📤 Step 1: Checking wallet balance...');
+    
+    const Wallet = require('../models/Wallet');
+    const userWallet = await Wallet.findOne({ userId });
+
+    if (!userWallet) {
+      throw new Error('Wallet not found');
+    }
+
+    // Check sufficient balance
+    const sufficientBalance = isBonusDeposit 
+      ? userWallet.bonusBalance >= amount
+      : userWallet.balance >= amount;
+
+    if (!sufficientBalance) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient ${isBonusDeposit ? 'bonus' : 'regular'} balance. Available: $${isBonusDeposit ? userWallet.bonusBalance : userWallet.balance}`
+      });
+    }
+
+    // ✅ STEP 2: CREATE WALLET TRANSACTION (PENDING) - This will deduct balance
+    console.log('\n📝 Step 2: Creating wallet transaction...');
+    
+    const walletTransaction = userWallet.addTransaction({
+      type: 'game_deposit',
+      amount: amount,
+      description: `Transfer to ${game.name}${isBonusDeposit ? ' (Bonus)' : ''}`,
+      status: 'pending',
+      isBonus: isBonusDeposit,
+      gameDetails: {
+        gameType: game.gameType,
+        gameAccountId: accountId,
+        gameLogin: gameAccount.gameLogin
+      },
+      metadata: {
+        gameBonus: bonusAmount,
+        totalToGame: totalAmountToGame,
+        walletSource: isBonusDeposit ? 'bonus' : 'regular'
+      }
+    });
+
+    await userWallet.save();
+    walletTransactionId = walletTransaction._id;
+    walletDeducted = true;
+
+    console.log('✅ Wallet transaction created:', walletTransactionId);
+    console.log(`   Wallet balance ${isBonusDeposit ? 'bonus' : 'regular'}: $${isBonusDeposit ? userWallet.bonusBalance : userWallet.balance}`);
+
+    // ✅ CHECK IF CLIENT DISCONNECTED AFTER WALLET DEDUCTION
+    if (clientDisconnected) {
+      console.log('🚫 Client disconnected after wallet deduction - rolling back');
+      throw new Error('Request cancelled by client');
+    }
+
+    // ✅ STEP 3: CREATE GAME TRANSACTION (LINKED TO WALLET)
+    console.log('\n📝 Step 3: Creating game transaction...');
+    
+    const gameTransaction = {
       type: 'recharge',
-      amount: amount, // Store wallet deduction amount
+      amount: amount,
       remark: remark || `Deposit $${amount}${isBonusDeposit ? ' (Bonus)' : ''}`,
       status: 'pending',
-      isBonus: isBonusDeposit, // ✅ CRITICAL: Set the flag NOW
+      isBonus: isBonusDeposit,
+      walletTransactionId: walletTransactionId,
       metadata: {
         walletSource: isBonusDeposit ? 'bonus' : 'regular',
         walletDeduction: amount,
@@ -316,17 +399,21 @@ const rechargeAccount = async (req, res) => {
       }
     };
 
-    await gameAccount.addTransaction(transaction);
-    const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
+    await gameAccount.addTransaction(gameTransaction);
+    transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
 
-    console.log(`✅ Game transaction created:`);
-    console.log(`   ID: ${transactionId}`);
-    console.log(`   isBonus: ${isBonusDeposit}`);
-    console.log(`   Amount (wallet): $${amount}`);
-    console.log(`   Amount (to game): $${totalAmountToGame}`);
+    console.log('✅ Game transaction created:', transactionId);
 
-    // Call game controller
-    const result = await controller.rechargeAccount(
+    // ✅ CHECK CLIENT AGAIN BEFORE PUPPETEER
+    if (clientDisconnected) {
+      console.log('🚫 Client disconnected before Puppeteer - rolling back');
+      throw new Error('Request cancelled by client');
+    }
+
+    // ✅ STEP 4: CALL GAME CONTROLLER WITH TIMEOUT
+    console.log('\n🎮 Step 4: Calling game controller...');
+    
+    const puppeteerPromise = controller.rechargeAccount(
       userId, 
       gameAccount.gameLogin, 
       totalAmountToGame,
@@ -334,8 +421,48 @@ const rechargeAccount = async (req, res) => {
       remark || `Deposit $${amount}`
     );
 
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Game recharge timeout after 30 seconds')), 30000);
+    });
+
+    const result = await Promise.race([puppeteerPromise, timeoutPromise]);
+
+    // ✅ CHECK IF CLIENT DISCONNECTED DURING PUPPETEER
+    if (clientDisconnected) {
+      console.log('⚠️ Client disconnected during Puppeteer operation');
+      
+      if (result.success) {
+        // Game was charged but client disconnected
+        gameRecharged = true;
+        
+        // Mark game transaction as completed
+        const updatedGameAccount = await GameAccount.findById(accountId);
+        const recentTransaction = updatedGameAccount.transactions.id(transactionId);
+        
+        if (recentTransaction) {
+          recentTransaction.status = 'completed';
+          recentTransaction.completedAt = new Date();
+          recentTransaction.processedAt = new Date();
+          recentTransaction.metadata.completedDespiteDisconnect = true;
+          await updatedGameAccount.save();
+        }
+
+        // Mark wallet transaction as completed
+        const updatedWallet = await Wallet.findOne({ userId });
+        updatedWallet.updateTransactionStatus(walletTransactionId, 'completed');
+        await updatedWallet.save();
+
+        console.log('✅ Transaction completed despite client disconnect');
+        return; // Don't send response - client is gone
+      } else {
+        throw new Error('Client disconnected and game recharge failed');
+      }
+    }
+
     if (result.success) {
-      // ✅ Mark transaction as completed and PRESERVE isBonus
+      gameRecharged = true;
+
+      // ✅ Mark game transaction as completed
       const updatedGameAccount = await GameAccount.findById(accountId);
       const recentTransaction = updatedGameAccount.transactions.id(transactionId);
       
@@ -343,56 +470,121 @@ const rechargeAccount = async (req, res) => {
         recentTransaction.status = 'completed';
         recentTransaction.completedAt = new Date();
         recentTransaction.processedAt = new Date();
-        recentTransaction.isBonus = isBonusDeposit; // ✅ Re-affirm the flag
         await updatedGameAccount.save();
-        
-        console.log(`✅ Transaction ${transactionId} marked as completed`);
-        console.log(`   isBonus flag preserved: ${recentTransaction.isBonus}`);
       }
 
-      res.json({
+      // ✅ Mark wallet transaction as completed
+      const updatedWallet = await Wallet.findOne({ userId });
+      updatedWallet.updateTransactionStatus(walletTransactionId, 'completed');
+      await updatedWallet.save();
+
+      console.log('✅ All transactions completed successfully');
+
+      return res.json({
         success: true,
-        message: `Recharge completed successfully${isBonusDeposit ? ' (Bonus Balance Used)' : ''}`,
+        message: `Recharge completed${isBonusDeposit ? ' (Bonus Balance Used)' : ''}`,
         data: {
           ...result.data,
           transactionId: recentTransaction?._id,
+          walletTransactionId: walletTransactionId,
           status: 'completed',
           walletDeduction: amount,
           gameBonus: bonusAmount,
           totalToGame: totalAmountToGame,
-          fundedByBonus: isBonusDeposit,
-          isBonus: isBonusDeposit // ✅ Return this to frontend
+          isBonus: isBonusDeposit
         }
       });
     } else {
-      const updatedGameAccount = await GameAccount.findById(accountId);
-      const recentTransaction = updatedGameAccount.transactions.id(transactionId);
-      
-      if (recentTransaction) {
-        recentTransaction.status = 'failed';
-        recentTransaction.metadata.failureReason = result.message;
-        await updatedGameAccount.save();
-      }
-      
-      throw new Error(result.message || 'Recharge failed');
+      throw new Error(result.message || 'Game recharge failed');
     }
 
   } catch (error) {
-    console.error('❌ Error processing recharge:', error);
-    res.status(400).json({
-      success: false,
-      message: error.message || 'Error processing recharge'
-    });
+    console.error('❌ RECHARGE FAILED:', error.message);
+
+    const failureReason = clientDisconnected ? 'cancelled' : 'failed';
+    
+    // ✅ ROLLBACK LOGIC
+    if (walletDeducted && !gameRecharged) {
+      console.log(`🔄 Rolling back wallet transaction (${failureReason})...`);
+      
+      try {
+        const Wallet = require('../models/Wallet');
+        const updatedWallet = await Wallet.findOne({ userId: req.user.userId });
+        
+        if (updatedWallet && walletTransactionId) {
+          // ✅ Use the Wallet's built-in method to update status
+          // This will automatically refund the balance
+          updatedWallet.updateTransactionStatus(walletTransactionId, failureReason);
+          await updatedWallet.save();
+          
+          console.log(`✅ Wallet transaction marked as ${failureReason} and balance refunded`);
+        }
+      } catch (rollbackError) {
+        console.error('❌ CRITICAL: Rollback failed!', rollbackError);
+        // TODO: Log to monitoring system, alert admins
+      }
+    }
+
+    // ✅ Mark game transaction as failed/cancelled
+    if (transactionId) {
+      try {
+        const updatedGameAccount = await GameAccount.findById(req.params.accountId);
+        const failedTx = updatedGameAccount.transactions.id(transactionId);
+        
+        if (failedTx) {
+          failedTx.status = failureReason;
+          failedTx.metadata.failureReason = error.message;
+          failedTx.metadata.failureType = failureReason;
+          failedTx[`${failureReason}At`] = new Date();
+          await updatedGameAccount.save();
+          
+          console.log(`✅ Game transaction marked as ${failureReason}`);
+        }
+      } catch (updateError) {
+        console.error('Failed to update game transaction status:', updateError);
+      }
+    }
+
+    // Only send response if client is still connected
+    if (!clientDisconnected && !res.headersSent) {
+      return res.status(400).json({
+        success: false,
+        message: error.message || 'Recharge failed',
+        status: failureReason,
+        rolledBack: walletDeducted && !gameRecharged
+      });
+    }
   }
 };
 
 const redeemFromAccount = async (req, res) => {
+  let transactionId = null;
+  let walletTransactionId = null;
+  let walletCredited = false;
+  let gameRedeemed = false;
+  let clientDisconnected = false;
+
+  // ✅ Detect if client disconnects (page refresh/close)
+  req.on('close', () => {
+    if (!res.headersSent) {
+      console.log('⚠️ CLIENT DISCONNECTED - Redeem request aborted');
+      clientDisconnected = true;
+    }
+  });
+
   try {
     const userId = req.user.userId;
     const { slug, accountId } = req.params;
     const { amount, remark } = req.body;
 
-    // ✅ UPDATED: Validate integer
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+    console.log(`💵 REDEEM REQUEST RECEIVED`);
+    console.log(`User: ${userId}`);
+    console.log(`Account: ${accountId}`);
+    console.log(`Requested Amount: $${amount}`);
+    console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+
+    // ✅ Validate integer
     if (!amount || amount <= 0 || !Number.isInteger(amount)) {
       return res.status(400).json({
         success: false,
@@ -409,6 +601,20 @@ const redeemFromAccount = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'Game account not found'
+      });
+    }
+
+    // ✅ CHECK FOR EXISTING PENDING REDEEM TRANSACTIONS
+    const existingPending = gameAccount.transactions.find(
+      t => t.type === 'redeem' && t.status === 'pending'
+    );
+
+    if (existingPending) {
+      console.log('⚠️ Found existing pending redeem transaction:', existingPending._id);
+      return res.status(409).json({
+        success: false,
+        message: 'A cashout is already in progress. Please wait or refresh.',
+        pendingTransactionId: existingPending._id
       });
     }
 
@@ -445,27 +651,36 @@ const redeemFromAccount = async (req, res) => {
       });
     }
 
-    // ✅ UPDATED: Round game balance to integer for comparison
-    const gameBalance = Math.floor(gameAccount.balance);
+    // ✅ Get fresh balance from game
+    const { game, controller } = await loadGameController(slug);
     
-    if (amount > gameBalance) {
+    console.log('\n🔍 Step 1: Checking current game balance...');
+    const balanceCheck = await controller.getGameBalance(userId, gameAccount.gameLogin);
+    
+    if (!balanceCheck.success) {
+      throw new Error('Failed to fetch current game balance');
+    }
+
+    const currentGameBalance = Math.floor(balanceCheck.data.balance);
+    console.log(`Current game balance: $${currentGameBalance}`);
+    
+    if (amount > currentGameBalance) {
       return res.status(400).json({
         success: false,
-        message: `Insufficient balance. Available: $${gameBalance}`
+        message: `Insufficient balance. Available: $${currentGameBalance}`
       });
     }
 
-    const { game, controller } = await loadGameController(slug);
-    const totalGameBalance = Math.floor(gameAccount.balance); // ✅ Integer
+    const totalGameBalance = currentGameBalance;
     const voidedAmount = totalGameBalance - amount;
     
-    // ✅ UPDATED: Integer calculation for wallet transfer
+    // ✅ Calculate wallet transfer amount
     const walletTransferAmount = lastDeposit.isBonus 
-      ? Math.floor(amount * 0.10)  // ✅ 10% rounded down
+      ? Math.floor(amount * 0.10)
       : amount;
     
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-    console.log(`💵 CASHOUT REQUEST`);
+    console.log(`💵 CASHOUT CALCULATION`);
     console.log(`Requested Cashout: $${amount}`);
     console.log(`Total Game Balance: $${totalGameBalance}`);
     console.log(`Will Void: $${voidedAmount}`);
@@ -474,7 +689,10 @@ const redeemFromAccount = async (req, res) => {
     console.log(`Cashout Limits: $${rule.cashoutLimits.min}-$${rule.cashoutLimits.max}`);
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
-    const transaction = {
+    // ✅ STEP 2: CREATE GAME TRANSACTION (PENDING)
+    console.log('\n📝 Step 2: Creating game transaction...');
+    
+    const gameTransaction = {
       type: 'redeem',
       amount: amount,
       remark: remark || `Cashout $${amount}`,
@@ -491,10 +709,21 @@ const redeemFromAccount = async (req, res) => {
       }
     };
 
-    await gameAccount.addTransaction(transaction);
-    const transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
+    await gameAccount.addTransaction(gameTransaction);
+    transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
+    
+    console.log('✅ Game transaction created:', transactionId);
 
-    const result = await controller.redeemFromAccount(
+    // ✅ CHECK IF CLIENT DISCONNECTED
+    if (clientDisconnected) {
+      console.log('🚫 Client disconnected after game transaction creation');
+      throw new Error('Request cancelled by client');
+    }
+
+    // ✅ STEP 3: CALL GAME CONTROLLER (PUPPETEER) WITH TIMEOUT
+    console.log('\n🎮 Step 3: Calling game controller to redeem...');
+    
+    const puppeteerPromise = controller.redeemFromAccount(
       userId, 
       gameAccount.gameLogin, 
       totalGameBalance,
@@ -502,7 +731,69 @@ const redeemFromAccount = async (req, res) => {
       remark || `Cashout $${amount}`
     );
 
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('Game redeem timeout after 30 seconds')), 30000);
+    });
+
+    const result = await Promise.race([puppeteerPromise, timeoutPromise]);
+
+    // ✅ CHECK IF CLIENT DISCONNECTED DURING PUPPETEER
+    if (clientDisconnected) {
+      console.log('⚠️ Client disconnected during Puppeteer operation');
+      
+      if (result.success) {
+        // Game was redeemed but client disconnected
+        gameRedeemed = true;
+        
+        // Continue with wallet credit even though client is gone
+        console.log('🔄 Proceeding to credit wallet despite disconnect...');
+      } else {
+        throw new Error('Client disconnected and game redeem failed');
+      }
+    }
+
     if (result.success) {
+      gameRedeemed = true;
+
+      // ✅ STEP 4: CREDIT WALLET (ONLY IF GAME REDEEM SUCCEEDED)
+      console.log('\n💰 Step 4: Crediting wallet...');
+      
+      const Wallet = require('../models/Wallet');
+      const userWallet = await Wallet.findOne({ userId });
+
+      if (!userWallet) {
+        throw new Error('Wallet not found');
+      }
+
+      // Create wallet transaction (game_withdrawal adds to balance)
+      const walletTransaction = userWallet.addTransaction({
+        type: 'game_withdrawal',
+        amount: walletTransferAmount,
+        description: `Cashout from ${game.name}${lastDeposit.isBonus ? ' (10% restriction)' : ''}`,
+        status: 'completed', // ✅ Immediately completed since game already redeemed
+        isBonus: false, // Always goes to regular balance
+        gameDetails: {
+          gameType: game.gameType,
+          gameAccountId: accountId,
+          gameLogin: gameAccount.gameLogin
+        },
+        metadata: {
+          gameRedeemedAmount: totalGameBalance,
+          requestedCashout: amount,
+          voidedAmount: voidedAmount,
+          fundedByBonus: lastDeposit.isBonus,
+          transferPercentage: lastDeposit.isBonus ? 10 : 100
+        }
+      });
+
+      await userWallet.save();
+      walletTransactionId = walletTransaction._id;
+      walletCredited = true;
+
+      console.log('✅ Wallet credited:', walletTransactionId);
+      console.log(`   Wallet balance: $${userWallet.balance}`);
+
+      // ✅ STEP 5: MARK GAME TRANSACTION AS COMPLETED
       const updatedGameAccount = await GameAccount.findById(accountId);
       const recentTransaction = updatedGameAccount.transactions.id(transactionId);
       
@@ -510,45 +801,103 @@ const redeemFromAccount = async (req, res) => {
         recentTransaction.status = 'completed';
         recentTransaction.completedAt = new Date();
         recentTransaction.processedAt = new Date();
-        await updatedGameAccount.save();
-      }
-
-      console.log(`✅ Cashout completed - Game redeemed: $${totalGameBalance}, Wallet gets: $${walletTransferAmount}`);
-
-      res.json({
-        success: true,
-        message: `Cashout completed successfully${lastDeposit.isBonus ? ' (10% restriction applied)' : ''}`,
-        data: {
-          ...result.data,
-          transactionId: recentTransaction?._id,
-          status: 'completed',
-          totalRedeemedFromGame: totalGameBalance,
-          requestedCashout: amount,
-          voidedAmount: voidedAmount,
-          walletTransferAmount: walletTransferAmount,
-          wasFundedByBonus: lastDeposit.isBonus,
-          transferPercentage: lastDeposit.isBonus ? 10 : 100
+        recentTransaction.walletTransactionId = walletTransactionId;
+        
+        if (clientDisconnected) {
+          recentTransaction.metadata.completedDespiteDisconnect = true;
         }
-      });
-    } else {
-      const updatedGameAccount = await GameAccount.findById(accountId);
-      const recentTransaction = updatedGameAccount.transactions.id(transactionId);
-      
-      if (recentTransaction) {
-        recentTransaction.status = 'failed';
-        recentTransaction.metadata.failureReason = result.message;
+        
         await updatedGameAccount.save();
       }
-      
+
+      console.log('✅ Cashout completed successfully');
+
+      // Only send response if client is still connected
+      if (!clientDisconnected && !res.headersSent) {
+        return res.json({
+          success: true,
+          message: `Cashout completed successfully${lastDeposit.isBonus ? ' (10% restriction applied)' : ''}`,
+          data: {
+            ...result.data,
+            transactionId: recentTransaction?._id,
+            walletTransactionId: walletTransactionId,
+            status: 'completed',
+            totalRedeemedFromGame: totalGameBalance,
+            requestedCashout: amount,
+            voidedAmount: voidedAmount,
+            walletTransferAmount: walletTransferAmount,
+            wasFundedByBonus: lastDeposit.isBonus,
+            transferPercentage: lastDeposit.isBonus ? 10 : 100
+          }
+        });
+      }
+    } else {
       throw new Error(result.message || 'Redeem failed');
     }
 
   } catch (error) {
-    console.error('❌ Error processing redeem:', error);
-    res.status(400).json({
-      success: false,
-      message: error.message || 'Error processing redeem'
-    });
+    console.error('❌ REDEEM FAILED:', error.message);
+
+    const failureReason = clientDisconnected ? 'cancelled' : 'failed';
+
+    // ✅ ROLLBACK LOGIC
+    // Note: For redeem, we DON'T refund wallet because:
+    // 1. Game redeem happens BEFORE wallet credit
+    // 2. If game redeem fails, nothing was taken from wallet yet
+    // 3. If game redeem succeeds, wallet should be credited (even if client disconnected)
+
+    if (gameRedeemed && !walletCredited) {
+      // ⚠️ CRITICAL SITUATION: Game was redeemed but wallet credit failed
+      console.error('🚨 CRITICAL: Game redeemed but wallet credit failed!');
+      console.error('   Manual intervention required - user balance voided from game');
+      
+      // TODO: Log to monitoring system, create manual review ticket
+      // For now, mark transaction as needing review
+      try {
+        const updatedGameAccount = await GameAccount.findById(req.params.accountId);
+        const failedTx = updatedGameAccount.transactions.id(transactionId);
+        
+        if (failedTx) {
+          failedTx.status = 'requires_review';
+          failedTx.metadata.criticalError = true;
+          failedTx.metadata.errorReason = 'Game redeemed but wallet credit failed';
+          failedTx.metadata.gameRedeemedSuccessfully = true;
+          await updatedGameAccount.save();
+        }
+      } catch (updateError) {
+        console.error('Failed to update transaction for review:', updateError);
+      }
+    }
+
+    // ✅ Mark game transaction as failed/cancelled (if no wallet credit happened)
+    if (transactionId && !walletCredited) {
+      try {
+        const updatedGameAccount = await GameAccount.findById(req.params.accountId);
+        const failedTx = updatedGameAccount.transactions.id(transactionId);
+        
+        if (failedTx) {
+          failedTx.status = failureReason;
+          failedTx.metadata.failureReason = error.message;
+          failedTx.metadata.failureType = failureReason;
+          failedTx[`${failureReason}At`] = new Date();
+          await updatedGameAccount.save();
+          
+          console.log(`✅ Game transaction marked as ${failureReason}`);
+        }
+      } catch (updateError) {
+        console.error('Failed to update game transaction status:', updateError);
+      }
+    }
+
+    // Only send response if client is still connected
+    if (!clientDisconnected && !res.headersSent) {
+      return res.status(400).json({
+        success: false,
+        message: error.message || 'Cashout failed',
+        status: failureReason,
+        requiresReview: gameRedeemed && !walletCredited
+      });
+    }
   }
 };
 
