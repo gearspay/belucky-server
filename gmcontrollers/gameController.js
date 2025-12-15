@@ -414,12 +414,14 @@ const rechargeAccount = async (req, res) => {
       console.log('✅ Old pending transactions marked as failed. Proceeding with new recharge...\n');
     }
 
+    // ✅ LOAD GAME CONTROLLER EARLY - So game.name is available
     const { game, controller } = await loadGameController(slug);
     const isBonusDeposit = isBonus === true;
     const bonusAmount = Math.floor(amount * 0.1);
     const totalAmountToGame = amount + bonusAmount;
 
     console.log(`💰 Calculation: $${amount} + $${bonusAmount} bonus = $${totalAmountToGame} to game`);
+    console.log(`🎮 Game: ${game.name}`);
 
     // ✅ STEP 1: CHECK WALLET BALANCE FIRST
     console.log('\n💳 Checking wallet balance...');
@@ -443,12 +445,12 @@ const rechargeAccount = async (req, res) => {
       console.log(`✅ Regular balance sufficient: $${wallet.availableBalance} >= $${amount}`);
     }
 
-    // ✅ STEP 2: CREATE WALLET TRANSACTION (pending)
+    // ✅ STEP 2: CREATE WALLET TRANSACTION (pending) - NOW game.name is available
     console.log('\n💳 Creating wallet transaction (pending)...');
     const walletTransaction = wallet.addTransaction({
       type: 'game_deposit',
       amount,
-      description: remark || `Deposit to ${gameAccount.gameType}${isBonusDeposit ? ' (Bonus)' : ''}`,
+      description: remark || `Deposit to ${game.name}${isBonusDeposit ? ' (Bonus)' : ''}`,
       status: 'pending',
       isBonus: isBonusDeposit,
       gameDetails: {
@@ -468,13 +470,13 @@ const rechargeAccount = async (req, res) => {
     console.log(`✅ Wallet transaction created: ${walletTransactionId}`);
     console.log(`   Balance locked: ${isBonusDeposit ? 'Bonus' : 'Regular'} $${amount}`);
 
-    // ✅ STEP 3: CREATE GAME TRANSACTION
+    // ✅ STEP 3: CREATE GAME TRANSACTION - NOW game.name is available
     console.log('\n📝 Creating game transaction...');
     
     const gameTransaction = {
       type: 'recharge',
       amount: amount,
-      remark: remark || `Deposit $${amount}${isBonusDeposit ? ' (Bonus)' : ''}`,
+      remark: remark || `Deposit $${amount} to ${game.name}${isBonusDeposit ? ' (Bonus)' : ''}`,
       status: 'pending',
       isBonus: isBonusDeposit,
       walletTransactionId: walletTransactionId,
@@ -504,7 +506,7 @@ const rechargeAccount = async (req, res) => {
       gameAccount.gameLogin, 
       totalAmountToGame,
       amount,
-      remark || `Deposit $${amount}`
+      remark || `Deposit $${amount} to ${game.name}`
     );
 
     const timeoutPromise = new Promise((_, reject) => {
