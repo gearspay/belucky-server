@@ -274,6 +274,7 @@ const rechargeAccount = async (req, res) => {
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
     console.log(`📥 RECHARGE REQUEST`);
     console.log(`Amount: $${amount}, isBonus: ${isBonus}`);
+    console.log(`Custom Remark: "${remark || 'none'}"`);
     console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
     if (!amount || amount <= 0 || !Number.isInteger(amount)) {
@@ -415,13 +416,20 @@ const rechargeAccount = async (req, res) => {
     }
 
     // ✅ LOAD GAME CONTROLLER EARLY - So game.name is available
+    console.log(`\n🎮 Loading game controller for slug: "${slug}"...`);
     const { game, controller } = await loadGameController(slug);
+    console.log(`✅ Game loaded: ${game.name} (${game.gameType})`);
+    
     const isBonusDeposit = isBonus === true;
     const bonusAmount = Math.floor(amount * 0.1);
     const totalAmountToGame = amount + bonusAmount;
 
-    console.log(`💰 Calculation: $${amount} + $${bonusAmount} bonus = $${totalAmountToGame} to game`);
-    console.log(`🎮 Game: ${game.name}`);
+    console.log(`\n💰 Calculation:`);
+    console.log(`   User amount: $${amount}`);
+    console.log(`   Bonus amount: $${bonusAmount}`);
+    console.log(`   Total to game: $${totalAmountToGame}`);
+    console.log(`   Is bonus deposit: ${isBonusDeposit}`);
+    console.log(`   Game name: ${game.name}`);
 
     // ✅ STEP 1: CHECK WALLET BALANCE FIRST
     console.log('\n💳 Checking wallet balance...');
@@ -447,36 +455,53 @@ const rechargeAccount = async (req, res) => {
 
     // ✅ STEP 2: CREATE WALLET TRANSACTION (pending) - NOW game.name is available
     console.log('\n💳 Creating wallet transaction (pending)...');
+    
+    // ✅ ALWAYS INCLUDE GAME NAME - Don't let custom remark override it
+    const walletDescription = `Cash In to ${game.name} from ${isBonusDeposit ? 'Bonus Balance' : 'Wallet'}`;
+    
+    console.log(`📝 Wallet transaction description: "${walletDescription}"`);
+    
     const walletTransaction = wallet.addTransaction({
       type: 'game_deposit',
       amount,
-      description: remark || `Deposit to ${game.name}${isBonusDeposit ? ' (Bonus)' : ''}`,
+      description: walletDescription, // ✅ Always use our format with game name
       status: 'pending',
       isBonus: isBonusDeposit,
       gameDetails: {
         gameType: gameAccount.gameType,
+        gameName: game.name, // ✅ Store game name
         gameLogin: gameAccount.gameLogin,
         gameAccountId: gameAccount._id
       },
       referenceId: gameAccount._id,
       metadata: {
         sourceBalance: isBonusDeposit ? 'bonus' : 'regular',
-        requestedAt: new Date()
+        requestedAt: new Date(),
+        gameName: game.name, // ✅ Also in metadata
+        customRemark: remark || null // ✅ Store custom remark if provided
       }
     });
     
     await wallet.save();
     walletTransactionId = walletTransaction._id;
+    
     console.log(`✅ Wallet transaction created: ${walletTransactionId}`);
+    console.log(`   Description saved: "${walletTransaction.description}"`);
+    console.log(`   Game name: ${game.name}`);
     console.log(`   Balance locked: ${isBonusDeposit ? 'Bonus' : 'Regular'} $${amount}`);
 
     // ✅ STEP 3: CREATE GAME TRANSACTION - NOW game.name is available
     console.log('\n📝 Creating game transaction...');
     
+    // ✅ ALWAYS INCLUDE GAME NAME
+    const gameTransactionRemark = `Deposit $${amount} to ${game.name}${isBonusDeposit ? ' (Bonus)' : ''}`;
+    
+    console.log(`📝 Game transaction remark: "${gameTransactionRemark}"`);
+    
     const gameTransaction = {
       type: 'recharge',
       amount: amount,
-      remark: remark || `Deposit $${amount} to ${game.name}${isBonusDeposit ? ' (Bonus)' : ''}`,
+      remark: gameTransactionRemark, // ✅ Always include game name
       status: 'pending',
       isBonus: isBonusDeposit,
       walletTransactionId: walletTransactionId,
@@ -485,7 +510,9 @@ const rechargeAccount = async (req, res) => {
         walletDeduction: amount,
         gameBonus: bonusAmount,
         totalToGame: totalAmountToGame,
-        requestedAt: new Date()
+        requestedAt: new Date(),
+        gameName: game.name, // ✅ Store game name
+        customRemark: remark || null // ✅ Store custom remark if provided
       }
     };
 
@@ -493,6 +520,7 @@ const rechargeAccount = async (req, res) => {
     transactionId = gameAccount.transactions[gameAccount.transactions.length - 1]._id;
 
     console.log('✅ Game transaction created:', transactionId);
+    console.log(`   Remark: "${gameAccount.transactions[gameAccount.transactions.length - 1].remark}"`);
 
     if (clientDisconnected) {
       throw new Error('Request cancelled by client');
@@ -501,12 +529,16 @@ const rechargeAccount = async (req, res) => {
     // ✅ CALL GAME CONTROLLER WITH TIMEOUT
     console.log('\n🎮 Calling game controller...');
     
+    // Use custom remark for actual game recharge if provided, otherwise use our format
+    const gameControllerRemark = remark || `Deposit $${amount} to ${game.name}`;
+    console.log(`📝 Sending to game controller: "${gameControllerRemark}"`);
+    
     const puppeteerPromise = controller.rechargeAccount(
       userId, 
       gameAccount.gameLogin, 
       totalAmountToGame,
       amount,
-      remark || `Deposit $${amount} to ${game.name}`
+      gameControllerRemark // Send remark to game (this appears in game history)
     );
 
     const timeoutPromise = new Promise((_, reject) => {
@@ -550,6 +582,7 @@ const rechargeAccount = async (req, res) => {
 
       console.log('✅ Game recharge completed');
       console.log('✅ Wallet transaction completed');
+      console.log(`   Final wallet description: "${updatedWallet.transactions.id(walletTransactionId).description}"`);
 
       return res.json({
         success: true,
