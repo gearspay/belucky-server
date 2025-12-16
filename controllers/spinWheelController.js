@@ -1,10 +1,9 @@
-// controllers/spinWheelController.js - FRONTEND FIRST APPROACH
+// controllers/spinWheelController.js - FIXED: Spin rewards go to MAIN balance with isBonus flag
 const SpinReward = require('../models/SpinReward');
 const SpinConfiguration = require('../models/SpinConfiguration');
 const Wallet = require('../models/Wallet');
 
 // Get spin wheel configuration and user status
-// controllers/spinWheelController.js - Update getSpinConfig
 const getSpinConfig = async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -67,10 +66,10 @@ const getSpinConfig = async (req, res) => {
       code: code || undefined,
       data: {
         segments: config.segments.filter(segment => segment.isActive),
-        canSpinToday: canSpinToday && depositCheckPassed, // ✅ BOTH CONDITIONS MUST BE TRUE
+        canSpinToday: canSpinToday && depositCheckPassed,
         todaysSpin: todaysSpin || null,
         nextSpinAvailable: canSpinToday && depositCheckPassed ? null : getNextSpinTime(),
-        requiresDeposit: canSpinToday && !depositCheckPassed, // ✅ FLAG FOR FRONTEND
+        requiresDeposit: canSpinToday && !depositCheckPassed,
         depositAmount: depositAmount,
         depositRequired: depositRequired,
         reason: message || undefined
@@ -135,15 +134,13 @@ const spinWheel = async (req, res) => {
       });
     }
     
-    // VALIDATION 4: Probability check - verify the segment could reasonably be selected
-    // Calculate if this segment's weight makes it possible to win
+    // VALIDATION 4: Probability check
     const totalWeight = config.segments
       .filter(s => s.isActive)
       .reduce((sum, s) => sum + s.weight, 0);
     
     const segmentProbability = segment.weight / totalWeight;
     
-    // Log for monitoring (can detect if high-value segments are being hit too often)
     console.log('Spin probability check:', {
       userId,
       segmentId,
@@ -153,51 +150,11 @@ const spinWheel = async (req, res) => {
       timestamp: new Date()
     });
     
-    // Optional: Add rate limiting check for suspicious patterns
-    // Check if user is hitting high-value segments too frequently
-    const recentSpins = await SpinReward.find({
-      userId,
-      spinDate: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } // Last 7 days
-    }).sort({ spinDate: -1 }).limit(7);
-    
-    // If this is a high-value segment (top 25% by value)
-    const sortedSegments = [...config.segments]
-      .filter(s => s.type === 'cash' && s.isActive)
-      .sort((a, b) => Number(b.value) - Number(a.value));
-    
-    const topQuartileThreshold = sortedSegments.length > 0 ? 
-      sortedSegments[Math.floor(sortedSegments.length * 0.25)]?.value || 0 : 0;
-    
-    const isHighValue = segment.type === 'cash' && Number(segment.value) >= topQuartileThreshold;
-    
-    if (isHighValue && recentSpins.length >= 3) {
-      const highValueCount = recentSpins.filter(spin => 
-        spin.rewardType === 'cash' && Number(spin.rewardValue) >= topQuartileThreshold
-      ).length;
-      
-      // If user hit 3+ high-value segments in last 7 spins, flag for review
-      if (highValueCount >= 3) {
-        console.warn('⚠️ Suspicious pattern detected:', {
-          userId,
-          highValueHits: highValueCount,
-          last7Spins: recentSpins.length,
-          currentSegment: segment.value,
-          message: 'User hitting high-value segments frequently - may need review'
-        });
-        
-        // Optional: You could reject here or just flag for manual review
-        // return res.status(429).json({
-        //   success: false,
-        //   message: 'Spin rate limit exceeded. Please contact support.'
-        // });
-      }
-    }
-    
-    // VALIDATION 5: Check for duplicate spin attempts (within last 5 seconds)
+    // VALIDATION 5: Check for duplicate spin attempts
     const recentDuplicate = await SpinReward.findOne({
       userId,
       segmentId,
-      spinDate: { $gte: new Date(Date.now() - 5000) } // Last 5 seconds
+      spinDate: { $gte: new Date(Date.now() - 5000) }
     });
     
     if (recentDuplicate) {
@@ -329,26 +286,28 @@ const getPendingRewards = async (req, res) => {
   }
 };
 
-// Process reward and add to user wallet/account
+// ✅ FIXED: Process reward - goes to MAIN balance with isBonus flag
 const processReward = async (spinReward, userId) => {
   const result = { processed: false, message: '', data: {} };
   
   try {
     switch (spinReward.rewardType) {
       case 'cash':
-        // Add cash to user wallet
+        // ✅ Add cash to MAIN wallet balance with isBonus flag
         const wallet = await Wallet.findOrCreateWallet(userId);
         
-        // Add transaction to wallet using 'bonus' type
+        // ✅ Use 'deposit' type (goes to MAIN balance) but mark with isBonus: true
         wallet.addTransaction({
-          type: 'bonus',
+          type: 'deposit',  // ✅ MAIN balance transaction type
           amount: parseFloat(spinReward.rewardValue),
           description: `Spin wheel reward - ${spinReward.rewardLabel}`,
           status: 'completed',
+          isBonus: true,  // ✅ FLAG: This came from bonus (spin wheel)
           referenceId: spinReward._id,
           metadata: {
             source: 'daily_spin_wheel',
-            rewardType: 'cash'
+            rewardType: 'cash',
+            spinRewardId: spinReward._id
           }
         });
         
@@ -358,6 +317,7 @@ const processReward = async (spinReward, userId) => {
         result.message = `$${spinReward.rewardValue} added to your wallet`;
         result.data.balanceAdded = parseFloat(spinReward.rewardValue);
         result.data.newBalance = wallet.balance;
+        result.data.addedToMainBalance = true;  // ✅ Confirmation flag
         break;
         
       case 'freeplay':
