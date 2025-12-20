@@ -9,11 +9,6 @@ class EmailService {
     
     // Remove trailing slash if exists
     this.websiteUrl = this.websiteUrl.replace(/\/$/, '');
-    
-    // Use Cloudinary logo URL from environment variable, fallback to default
-    this.logoUrl = process.env.LOGO_URL || 'https://belucky.win/images/logo.png';
-    this.facebookLogoUrl = 'https://belucky.win/images/facebook.png';
-    console.log('✅ Using logo from:', this.logoUrl);
   }
 
   init() {
@@ -42,8 +37,8 @@ class EmailService {
   // Get sender info
   getSender() {
     return {
-      address: process.env.SMTP_FROM_EMAIL || 'noreply@belucky.win',
-      name: process.env.SMTP_FROM_NAME || 'Belucky'
+      address: 'support@belucky.win',
+      name: 'Belucky Support'
     };
   }
 
@@ -51,7 +46,7 @@ class EmailService {
   async addToMailtrapContactList(email, username) {
     try {
       const accountId = process.env.MAILTRAP_ACCOUNT_ID;
-      const listId = process.env.MAILTRAP_LIST_ID || '1'; // Default to 1 if not set
+      const listId = process.env.MAILTRAP_LIST_ID || '1';
       
       if (!accountId) {
         console.log('⚠️ MAILTRAP_ACCOUNT_ID not set, skipping contact list addition');
@@ -158,66 +153,29 @@ class EmailService {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; }
-.wrapper { background: #f5f5f5; padding: 40px 20px; }
-.container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-.header { background: #ffffff; padding: 20px 30px 10px 30px; text-align: center; }
-.content { padding: 20px 30px 40px 30px; background: #ffffff; }
-.title { margin: 0 0 15px 0; color: #111827; font-size: 28px; font-weight: 700; text-align: center; }
-.message { margin: 0 0 30px 0; color: #6b7280; font-size: 15px; text-align: center; line-height: 1.6; }
-.otp-box { background: linear-gradient(135deg, #f3e8ff 0%, #e9d5ff 100%); border: 2px solid #a855f7; border-radius: 16px; padding: 30px 20px; margin: 0 auto 30px; max-width: 400px; text-align: center; }
-.otp-label { margin: 0 0 10px 0; color: #7c3aed; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; }
-.otp-code { margin: 0; font-size: 42px; font-weight: bold; color: #7c3aed; letter-spacing: 10px; font-family: 'Courier New', monospace; }
-.otp-validity { margin: 10px 0 0 0; color: #7c3aed; font-size: 13px; font-weight: 500; }
-.warning-box { background: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px 20px; border-radius: 8px; margin: 0 auto; max-width: 500px; }
-.warning-text { margin: 0; color: #92400e; font-size: 13px; line-height: 1.6; }
-.footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
-.footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.social-link { display: inline-block; margin: 0 5px 15px 5px; }
-.social-link img { width: 32px; height: 32px; }
-.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
-.unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
-.unsubscribe:hover { text-decoration: underline; }
-@media only screen and (max-width: 600px) {
-  .wrapper { padding: 20px 10px; }
-  .container { border-radius: 10px; }
-  .header { padding: 15px 20px 10px 20px; }
-  .content { padding: 20px 15px 30px 15px; }
-  .otp-code { font-size: 32px; letter-spacing: 6px; }
-  .title { font-size: 22px; }
-  .message { font-size: 14px; }
-  .otp-box { padding: 20px 15px; }
-  .warning-box { padding: 12px 15px; }
-  .footer { padding: 20px 15px; }
-}
-</style>
 </head>
-<body>
-<div class="wrapper">
-  <div class="container">
-    <div class="header">
-      <img src="${this.logoUrl}" alt="Belucky" width="140" style="max-width: 140px; height: auto;">
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+<div style="background-color: #f5f5f5; padding: 40px 20px;">
+  <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+    <div style="background: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%); padding: 30px; text-align: center;">
+      <h1 style="margin: 0; color: #ffffff; font-size: 32px; font-weight: 700; letter-spacing: 1px;">BELUCKY</h1>
     </div>
-    <div class="content">
-      <h2 class="title">${title}</h2>
-      <p class="message">${message}</p>
-      <div class="otp-box">
-        <p class="otp-label">Verification Code</p>
-        <div class="otp-code">${otp}</div>
-        <p class="otp-validity">Valid for 10 minutes</p>
+    <div style="padding: 40px 30px; background-color: #ffffff;">
+      <h2 style="margin: 0 0 15px 0; color: #111827; font-size: 28px; font-weight: 700; text-align: center;">${title}</h2>
+      <p style="margin: 0 0 30px 0; color: #6b7280; font-size: 15px; text-align: center; line-height: 1.6;">${message}</p>
+      <div style="background: linear-gradient(135deg, #f3e8ff 0%, #e9d5ff 100%); border: 2px solid #a855f7; border-radius: 16px; padding: 30px 20px; margin: 0 auto 30px; max-width: 400px; text-align: center;">
+        <p style="margin: 0 0 10px 0; color: #7c3aed; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px;">VERIFICATION CODE</p>
+        <div style="margin: 0; font-size: 42px; font-weight: bold; color: #7c3aed; letter-spacing: 10px; font-family: 'Courier New', monospace;">${otp}</div>
+        <p style="margin: 10px 0 0 0; color: #7c3aed; font-size: 13px; font-weight: 500;">Valid for 10 minutes</p>
       </div>
-      <div class="warning-box">
-        <p class="warning-text"><strong>Security Notice:</strong> Never share this code with anyone. Belucky will never ask for your verification code.</p>
+      <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px 20px; border-radius: 8px; margin: 0 auto; max-width: 500px;">
+        <p style="margin: 0; color: #92400e; font-size: 13px; line-height: 1.6;"><strong>Security Notice:</strong> Never share this code with anyone. Belucky will never ask for your verification code.</p>
       </div>
     </div>
-    <div class="footer">
-      <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="social-link">
-        <img src="${this.facebookLogoUrl}" alt="Facebook" />
-      </a>
-      <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
-      <a href="${this.websiteUrl}/api/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
+    <div style="background-color: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb;">
+      <p style="margin: 0 0 15px 0; color: #6b7280; font-size: 14px;">Need help? Visit <a href="https://belucky.win" style="color: #7c3aed; text-decoration: none; font-weight: 500;">belucky.win</a> or contact us on <a href="https://www.facebook.com/belucky.win" style="color: #7c3aed; text-decoration: none; font-weight: 500;">Facebook</a></p>
+      <p style="margin: 15px 0 10px 0; color: #9ca3af; font-size: 12px;">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
+      <a href="${this.websiteUrl}/api/api/unsubscribe?email=${encodeURIComponent(email)}" style="color: #9ca3af; font-size: 11px; text-decoration: none;">Unsubscribe</a>
     </div>
   </div>
 </div>
@@ -246,108 +204,6 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
     }
   }
 
-  // Send welcome email
-  async sendWelcomeEmail(email, username) {
-    this.init();
-
-    // Add user to Mailtrap contact list for future bulk campaigns
-    await this.addToMailtrapContactList(email, username);
-
-    const htmlContent = `
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; }
-.wrapper { background: #f5f5f5; padding: 40px 20px; }
-.container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-.header { background: #ffffff; padding: 30px 30px 20px 30px; text-align: center; }
-.content { padding: 30px 40px 40px 40px; background: #ffffff; }
-.greeting { margin: 0 0 10px 0; color: #6b7280; font-size: 16px; }
-.title { margin: 0 0 25px 0; color: #111827; font-size: 32px; font-weight: 700; line-height: 1.2; }
-.intro-text { margin: 0 0 30px 0; color: #4b5563; font-size: 16px; line-height: 1.6; }
-.features-box { background: #f9fafb; border-radius: 12px; padding: 30px; margin: 0 0 30px 0; }
-.feature-item { margin: 0 0 18px 0; color: #374151; font-size: 15px; line-height: 1.6; padding-left: 28px; position: relative; }
-.feature-item:last-child { margin-bottom: 0; }
-.feature-item:before { content: "✓"; position: absolute; left: 0; color: #10b981; font-weight: bold; font-size: 18px; }
-.closing-text { margin: 0 0 8px 0; color: #6b7280; font-size: 15px; line-height: 1.6; }
-.signature { margin: 0; color: #374151; font-size: 15px; font-weight: 600; }
-.footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
-.footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.social-link { display: inline-block; margin: 0 5px 15px 5px; }
-.social-link img { width: 32px; height: 32px; }
-.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
-.unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
-.unsubscribe:hover { text-decoration: underline; }
-@media only screen and (max-width: 600px) {
-  .wrapper { padding: 20px 10px; }
-  .container { border-radius: 10px; }
-  .header { padding: 20px 20px 15px 20px; }
-  .content { padding: 25px 20px 30px 20px; }
-  .title { font-size: 26px; }
-  .intro-text { font-size: 15px; }
-  .features-box { padding: 20px; }
-  .feature-item { font-size: 14px; }
-  .footer { padding: 20px 15px; }
-}
-</style>
-</head>
-<body>
-<div class="wrapper">
-  <div class="container">
-    <div class="header">
-      <img src="${this.logoUrl}" alt="Belucky" width="150" style="max-width: 150px; height: auto;">
-    </div>
-    <div class="content">
-      <p class="greeting">Hello <strong style="color: #111827;">${username}</strong>,</p>
-      <h1 class="title">Welcome To Belucky!</h1>
-      <p class="intro-text">We're excited to have you as part of our community. You have a bonus waiting for you!</p>
-      
-      <div class="features-box">
-        <div class="feature-item">Fast, secure, and hassle-free deposits & withdrawals</div>
-        <div class="feature-item">24/7 customer support whenever you need assistance</div>
-        <div class="feature-item">Secure and easy payment options</div>
-      </div>
-
-      <p class="closing-text">Best of luck,</p>
-      <p class="signature">The Belucky Team</p>
-    </div>
-    <div class="footer">
-      <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="social-link">
-        <img src="${this.facebookLogoUrl}" alt="Facebook" />
-      </a>
-      <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
-      <a href="${this.websiteUrl}/api/api/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
-    </div>
-  </div>
-</div>
-</body>
-</html>
-    `;
-
-    const sender = this.getSender();
-
-    const mailOptions = {
-      from: sender,
-      to: email,
-      subject: 'Welcome to Belucky - Your Account is Ready',
-      html: htmlContent,
-      category: 'Welcome Email'
-    };
-
-    try {
-      await this.transporter.sendMail(mailOptions);
-      console.log('✅ Welcome email sent successfully to:', email);
-      return { success: true };
-    } catch (error) {
-      console.error('❌ Error sending welcome email:', error);
-      return { success: false, error: error.message };
-    }
-  }
-
   // Send password reset email
   async sendPasswordResetEmail(email, resetLink) {
     this.init();
@@ -362,24 +218,26 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; }
 .wrapper { background: #f5f5f5; padding: 40px 20px; }
 .container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-.header { background: #ffffff; padding: 20px 30px 10px 30px; text-align: center; }
-.content { padding: 20px 30px 40px 30px; background: #ffffff; text-align: center; }
+.header { background: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%); padding: 30px; text-align: center; }
+.brand-name { margin: 0; color: #ffffff; font-size: 32px; font-weight: 700; letter-spacing: 1px; }
+.content { padding: 40px 30px; background: #ffffff; text-align: center; }
 .title { margin: 0 0 15px 0; color: #111827; font-size: 28px; font-weight: 700; }
 .message { margin: 0 0 35px 0; color: #6b7280; font-size: 15px; line-height: 1.6; }
 .reset-button { display: inline-block; background: linear-gradient(135deg, #a855f7 0%, #7c3aed 100%); color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 12px; font-weight: 600; font-size: 16px; margin-bottom: 20px; }
 .sub-message { margin: 0; color: #9ca3af; font-size: 13px; }
 .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
 .footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.social-link { display: inline-block; margin: 0 5px 15px 5px; }
-.social-link img { width: 32px; height: 32px; }
-.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
+.footer-link { color: #7c3aed; text-decoration: none; font-weight: 500; }
+.footer-link:hover { text-decoration: underline; }
+.footer-copy { margin: 15px 0 10px 0; color: #9ca3af; font-size: 12px; }
 .unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
 .unsubscribe:hover { text-decoration: underline; }
 @media only screen and (max-width: 600px) {
   .wrapper { padding: 20px 10px; }
   .container { border-radius: 10px; }
-  .header { padding: 15px 20px 10px 20px; }
-  .content { padding: 20px 15px 30px 15px; }
+  .header { padding: 20px; }
+  .brand-name { font-size: 26px; }
+  .content { padding: 30px 20px; }
   .title { font-size: 22px; }
   .message { font-size: 14px; }
   .reset-button { padding: 14px 32px; font-size: 15px; }
@@ -391,7 +249,7 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 <div class="wrapper">
   <div class="container">
     <div class="header">
-      <img src="${this.logoUrl}" alt="Belucky" width="140" style="max-width: 140px; height: auto;">
+      <h1 class="brand-name">BELUCKY</h1>
     </div>
     <div class="content">
       <h2 class="title">Reset Your Password</h2>
@@ -400,10 +258,7 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
       <p class="sub-message">If you didn't request this, please ignore this email<br>or contact support if you have concerns.</p>
     </div>
     <div class="footer">
-      <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="social-link">
-        <img src="${this.facebookLogoUrl}" alt="Facebook" />
-      </a>
+      <p class="footer-text">Need help? Visit <a href="https://belucky.win" class="footer-link">belucky.win</a> or contact us on <a href="https://www.facebook.com/belucky.win" class="footer-link">Facebook</a></p>
       <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
       <a href="${this.websiteUrl}/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>
@@ -447,23 +302,25 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; }
 .wrapper { background: #f5f5f5; padding: 40px 20px; }
 .container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-.header { background: #ffffff; padding: 20px 30px 10px 30px; text-align: center; }
-.content { padding: 20px 30px 40px 30px; background: #ffffff; text-align: center; }
+.header { background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%); padding: 30px; text-align: center; }
+.brand-name { margin: 0; color: #ffffff; font-size: 32px; font-weight: 700; letter-spacing: 1px; }
+.content { padding: 40px 30px; background: #ffffff; text-align: center; }
 .title { margin: 0 0 15px 0; color: #111827; font-size: 28px; font-weight: 700; }
 .message { margin: 0 0 35px 0; color: #6b7280; font-size: 15px; line-height: 1.6; }
 .promo-button { display: inline-block; background: linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%); color: #ffffff; text-decoration: none; padding: 16px 40px; border-radius: 12px; font-weight: 600; font-size: 16px; }
 .footer { background: #f9fafb; padding: 30px; text-align: center; border-top: 1px solid #e5e7eb; }
 .footer-text { margin: 0 0 15px 0; color: #6b7280; font-size: 14px; }
-.social-link { display: inline-block; margin: 0 5px 15px 5px; }
-.social-link img { width: 32px; height: 32px; }
-.footer-copy { margin: 0 0 10px 0; color: #9ca3af; font-size: 12px; }
+.footer-link { color: #3b82f6; text-decoration: none; font-weight: 500; }
+.footer-link:hover { text-decoration: underline; }
+.footer-copy { margin: 15px 0 10px 0; color: #9ca3af; font-size: 12px; }
 .unsubscribe { color: #9ca3af; font-size: 11px; text-decoration: none; }
 .unsubscribe:hover { text-decoration: underline; }
 @media only screen and (max-width: 600px) {
   .wrapper { padding: 20px 10px; }
   .container { border-radius: 10px; }
-  .header { padding: 15px 20px 10px 20px; }
-  .content { padding: 20px 15px 30px 15px; }
+  .header { padding: 20px; }
+  .brand-name { font-size: 26px; }
+  .content { padding: 30px 20px; }
   .title { font-size: 22px; }
   .message { font-size: 14px; }
   .promo-button { padding: 14px 32px; font-size: 15px; }
@@ -475,7 +332,7 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
 <div class="wrapper">
   <div class="container">
     <div class="header">
-      <img src="${this.logoUrl}" alt="Belucky" width="140" style="max-width: 140px; height: auto;">
+      <h1 class="brand-name">BELUCKY</h1>
     </div>
     <div class="content">
       <h2 class="title">${title}</h2>
@@ -483,10 +340,7 @@ body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'S
       <a href="${buttonLink}" class="promo-button">${buttonText}</a>
     </div>
     <div class="footer">
-      <p class="footer-text">Need help? Contact us on Facebook</p>
-      <a href="https://www.facebook.com/belucky.win" class="social-link">
-        <img src="${this.facebookLogoUrl}" alt="Facebook" />
-      </a>
+      <p class="footer-text">Need help? Visit <a href="https://belucky.win" class="footer-link">belucky.win</a> or contact us on <a href="https://www.facebook.com/belucky.win" class="footer-link">Facebook</a></p>
       <p class="footer-copy">© ${new Date().getFullYear()} Belucky.win - All rights reserved</p>
       <a href="${this.websiteUrl}/unsubscribe?email=${encodeURIComponent(email)}" class="unsubscribe">Unsubscribe</a>
     </div>

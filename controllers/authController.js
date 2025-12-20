@@ -297,6 +297,9 @@ const register = async (req, res) => {
 
     console.log(`✅ User registered: ${username} from IP: ${clientIP}`);
 
+    // Add user to Mailtrap contact list for future bulk campaigns
+    await emailService.addToMailtrapContactList(lowercaseEmail, username);
+
     // Award signup bonus
     let signupBonusAmount = 0;
     try {
@@ -331,7 +334,7 @@ const register = async (req, res) => {
       }
     }
 
-    // ✅ UPDATED REFERRAL LOGIC - 10% + 5% LIFETIME, NO REFERRED USER BONUS
+    // Process referral code
     let referralApplied = false;
     let referralCode = affiliateUsername || verifiedOTP.metadata?.referralCode;
     
@@ -341,7 +344,7 @@ const register = async (req, res) => {
       try {
         const referralTemplate = await Referral.findOne({
           referralCode: referralCode.toUpperCase(),
-          referredUserId: null // Find the template
+          referredUserId: null
         }).populate('referrerId', 'username');
 
         if (!referralTemplate) {
@@ -349,7 +352,6 @@ const register = async (req, res) => {
         } else if (referralTemplate.referrerId._id.toString() === newUser._id.toString()) {
           console.log('   ❌ User tried to refer themselves');
         } else {
-          // Check if user already has a referral
           const alreadyReferred = await Referral.findOne({
             referredUserId: newUser._id
           });
@@ -357,27 +359,25 @@ const register = async (req, res) => {
           if (alreadyReferred) {
             console.log('   ⚠️  User already has a referral applied');
           } else {
-            // Update user's affiliateId
             await User.findByIdAndUpdate(newUser._id, {
               affiliateId: referralTemplate.referrerId._id
             });
 
-            // ✅ CREATE NEW REFERRAL RECORD
             const newReferral = await Referral.create({
               referrerId: referralTemplate.referrerId._id,
-              referredUserId: newUser._id, // ✅ CRITICAL: Set the referred user ID
+              referredUserId: newUser._id,
               referralCode: referralCode.toUpperCase(),
               status: 'pending',
               rewards: {
                 referrerReward: 0,
-                referredReward: 0, // ✅ NO SIGNUP BONUS FOR REFERRED USER
+                referredReward: 0,
                 rewardType: 'percentage'
               },
               conditions: {
                 minDeposit: 10,
-                minGamesPlayed: 0, // ✅ No games required
-                maxRewardDeposits: 5, // First 5 deposits at 10%
-                lifetimeRewardRate: 5 // ✅ After 5th deposit at 5% forever
+                minGamesPlayed: 0,
+                maxRewardDeposits: 5,
+                lifetimeRewardRate: 5
               },
               metadata: {
                 referredUserIP: clientIP,
@@ -385,8 +385,8 @@ const register = async (req, res) => {
                 referralSource: 'registration',
                 depositCount: 0,
                 totalReferralEarnings: 0,
-                highRewardEarnings: 0, // ✅ Track 10% earnings
-                lifetimeEarnings: 0 // ✅ Track 5% earnings
+                highRewardEarnings: 0,
+                lifetimeEarnings: 0
               }
             });
 
@@ -408,11 +408,6 @@ const register = async (req, res) => {
 
     // Delete the OTP record after successful registration
     await OTP.findByIdAndDelete(verifiedOTP._id);
-
-    // Send welcome email (optional)
-    emailService.sendWelcomeEmail(lowercaseEmail, username).catch(err => {
-      console.error('Error sending welcome email:', err);
-    });
 
     const userResponse = {
       _id: newUser._id,
@@ -455,7 +450,6 @@ const register = async (req, res) => {
     });
   }
 };
-
 // ========================================
 // LOGIN WITH IP TRACKING
 // ========================================
