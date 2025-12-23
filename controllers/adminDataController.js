@@ -38,86 +38,167 @@ const getTimeAgo = (date) => {
 
 const getStats = async (req, res) => {
     try {
-        const totalUsers = await User.countDocuments();
+        // ✅ Use MongoDB aggregation for better performance
+        const [userStats, walletStats, gameAccountStats] = await Promise.all([
+            // Get total users count
+            User.countDocuments(),
+            
+            // Get wallet statistics using aggregation
+            Wallet.aggregate([
+                {
+                    $project: {
+                        balance: 1,
+                        transactions: 1
+                    }
+                },
+                {
+                    $facet: {
+                        balances: [
+                            {
+                                $group: {
+                                    _id: null,
+                                    totalBalance: { $sum: '$balance' },
+                                    activeWallets: {
+                                        $sum: { $cond: [{ $gt: ['$balance', 0] }, 1, 0] }
+                                    },
+                                    totalWallets: { $sum: 1 }
+                                }
+                            }
+                        ],
+                        transactions: [
+                            { $unwind: '$transactions' },
+                            {
+                                $match: {
+                                    'transactions.status': 'completed'
+                                }
+                            },
+                            {
+                                $group: {
+                                    _id: '$transactions.type',
+                                    total: {
+                                        $sum: {
+                                            $cond: [
+                                                {
+                                                    $and: [
+                                                        { $eq: ['$transactions.type', 'deposit'] },
+                                                        { $ne: ['$transactions.isBonus', true] }
+                                                    ]
+                                                },
+                                                '$transactions.amount',
+                                                {
+                                                    $cond: [
+                                                        { $eq: ['$transactions.type', 'withdrawal'] },
+                                                        '$transactions.amount',
+                                                        0
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    },
+                                    count: { $sum: 1 }
+                                }
+                            }
+                        ],
+                        pending: [
+                            { $unwind: '$transactions' },
+                            {
+                                $match: {
+                                    'transactions.type': 'withdrawal',
+                                    'transactions.status': 'pending'
+                                }
+                            },
+                            {
+                                $count: 'count'
+                            }
+                        ]
+                    }
+                }
+            ]),
+            
+            // Get active game accounts count
+            GameAccount.countDocuments({ status: 'active' })
+        ]);
+
+        // Process wallet stats
+        const balanceStats = walletStats[0].balances[0] || {
+            totalBalance: 0,
+            activeWallets: 0,
+            totalWallets: 0
+        };
+
+        const transactionStats = walletStats[0].transactions.reduce((acc, curr) => {
+            if (curr._id === 'deposit') {
+                acc.totalDeposits = curr.total;
+                acc.completedTransactions += curr.count;
+            } else if (curr._id === 'withdrawal') {
+                acc.totalWithdrawals = curr.total;
+                acc.completedTransactions += curr.count;
+            }
+            return acc;
+        }, { totalDeposits: 0, totalWithdrawals: 0, completedTransactions: 0 });
+
+        const pendingWithdrawals = walletStats[0].pending[0]?.count || 0;
+
+        // ✅ Get recent users (limited to 5)
         const recentUsers = await User.find()
             .sort({ createdAt: -1 })
             .limit(5)
             .select('username email createdAt')
             .lean();
 
-        // ✅ FIX: Count active game accounts instead of Game model
-        const activeGames = await GameAccount.countDocuments({ 
-            status: 'active'
-        });
+        // ✅ Get recent transactions (limited to 10)
+        const recentTransactionsData = await Wallet.aggregate([
+            { $unwind: '$transactions' },
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'userId',
+                    foreignField: '_id',
+                    as: 'user'
+                }
+            },
+            { $unwind: '$user' },
+            {
+                $project: {
+                    _id: '$transactions._id',
+                    username: '$user.username',
+                    userEmail: '$user.email',
+                    type: '$transactions.type',
+                    amount: '$transactions.amount',
+                    netAmount: '$transactions.netAmount',
+                    fee: '$transactions.fee',
+                    status: '$transactions.status',
+                    paymentMethod: '$transactions.paymentMethod',
+                    isBonus: '$transactions.isBonus',
+                    createdAt: '$transactions.createdAt'
+                }
+            },
+            { $sort: { createdAt: -1 } },
+            { $limit: 10 }
+        ]);
 
-        // Get all wallets with transactions
-        const wallets = await Wallet.find({})
-            .populate('userId', 'username email')
-            .lean();
+        const recentTransactions = recentTransactionsData.map(tx => ({
+            ...tx,
+            timeAgo: getTimeAgo(tx.createdAt)
+        }));
 
-        let totalDeposits = 0;
-        let totalWithdrawals = 0;
-        let pendingWithdrawals = 0;
-        let completedTransactions = 0;
-        let totalBalance = 0;
-        let activeWallets = 0;
-        let recentTransactionsList = [];
-
-        wallets.forEach(wallet => {
-            totalBalance += wallet.balance || 0;
-            if (wallet.balance > 0) activeWallets++;
-
-            if (wallet.transactions && Array.isArray(wallet.transactions)) {
-                wallet.transactions.forEach(tx => {
-                    recentTransactionsList.push({
-                        _id: tx._id,
-                        username: wallet.userId?.username || 'Unknown',
-                        userEmail: wallet.userId?.email || '',
-                        type: tx.type,
-                        amount: tx.amount,
-                        netAmount: tx.netAmount,
-                        fee: tx.fee || 0,
-                        status: tx.status,
-                        paymentMethod: tx.paymentMethod || 'N/A',
-                        isBonus: tx.isBonus || false, // ✅ Add isBonus flag
-                        createdAt: tx.createdAt,
-                        timeAgo: getTimeAgo(tx.createdAt)
-                    });
-
-                    // ✅ FIXED: Only count REAL deposits (isBonus === false)
-                    if (tx.type === 'deposit' && tx.status === 'completed' && tx.isBonus === false) {
-                        totalDeposits += tx.amount || 0;
-                        completedTransactions++;
-                    } else if (tx.type === 'withdrawal') {
-                        if (tx.status === 'completed') {
-                            totalWithdrawals += tx.amount || 0;
-                            completedTransactions++;
-                        } else if (tx.status === 'pending') {
-                            pendingWithdrawals++;
-                        }
-                    }
-                });
-            }
-        });
-
-        recentTransactionsList.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        const recentTransactions = recentTransactionsList.slice(0, 10);
-
-        const monthlyGrowth = totalDeposits > 0 ? ((totalDeposits - totalWithdrawals) / totalDeposits * 100).toFixed(1) : 0;
+        const monthlyGrowth = transactionStats.totalDeposits > 0 
+            ? ((transactionStats.totalDeposits - transactionStats.totalWithdrawals) / transactionStats.totalDeposits * 100).toFixed(1) 
+            : 0;
 
         res.json({
             success: true,
             data: {
-                totalUsers,
-                activeGames,
-                totalDeposits, // ✅ Now only REAL deposits
-                totalWithdrawals,
+                totalUsers: userStats,
+                activeGames: gameAccountStats,
+                totalDeposits: transactionStats.totalDeposits,
+                totalWithdrawals: transactionStats.totalWithdrawals,
                 pendingTransactions: pendingWithdrawals,
-                completedTransactions,
-                revenue: totalDeposits - totalWithdrawals,
-                totalRevenue: totalDeposits - totalWithdrawals,
-                totalBalance,
-                activeWallets,
+                completedTransactions: transactionStats.completedTransactions,
+                revenue: transactionStats.totalDeposits - transactionStats.totalWithdrawals,
+                totalRevenue: transactionStats.totalDeposits - transactionStats.totalWithdrawals,
+                totalBalance: balanceStats.totalBalance,
+                activeWallets: balanceStats.activeWallets,
                 monthlyGrowth: parseFloat(monthlyGrowth),
                 recentUsers,
                 recentTransactions
@@ -162,74 +243,92 @@ const getChartData = async (req, res) => {
             groupBy = daysDiff > 60 ? 'month' : daysDiff > 7 ? 'week' : 'day';
         }
 
-        // Get all wallets with transactions
-        const wallets = await Wallet.find({}).lean();
-
-        // Initialize data structure
-        const chartData = [];
-        const deposits = {};
-        const withdrawals = {};
-
-        // Process transactions
-        wallets.forEach(wallet => {
-            if (wallet.transactions && Array.isArray(wallet.transactions)) {
-                wallet.transactions.forEach(tx => {
-                    const txDate = new Date(tx.createdAt);
-                    
-                    // Filter by date range
-                    if (txDate < start || txDate > end) return;
-                    if (tx.status !== 'completed') return;
-
-                    // Format date key based on groupBy
-                    let dateKey;
-                    if (groupBy === 'hour') {
-                        dateKey = `${String(txDate.getHours()).padStart(2, '0')}:00`;
-                    } else if (groupBy === 'day') {
-                        dateKey = txDate.toISOString().split('T')[0];
-                    } else if (groupBy === 'week') {
-                        const weekStart = new Date(txDate);
-                        weekStart.setDate(txDate.getDate() - txDate.getDay());
-                        dateKey = weekStart.toISOString().split('T')[0];
-                    } else if (groupBy === 'month') {
-                        dateKey = `${txDate.getFullYear()}-${String(txDate.getMonth() + 1).padStart(2, '0')}`;
+        // ✅ Use aggregation for better performance
+        const chartDataResult = await Wallet.aggregate([
+            { $unwind: '$transactions' },
+            {
+                $match: {
+                    'transactions.status': 'completed',
+                    'transactions.createdAt': {
+                        $gte: start,
+                        $lte: end
                     }
-
-                    // ✅ FIXED: Only count REAL deposits (isBonus === false)
-                    if (tx.type === 'deposit' && tx.isBonus === false) {
-                        deposits[dateKey] = (deposits[dateKey] || 0) + (tx.amount || 0);
-                    } else if (tx.type === 'withdrawal') {
-                        withdrawals[dateKey] = (withdrawals[dateKey] || 0) + (tx.amount || 0);
+                }
+            },
+            {
+                $group: {
+                    _id: {
+                        date: {
+                            $dateToString: {
+                                format: groupBy === 'hour' ? '%Y-%m-%d %H:00' :
+                                       groupBy === 'day' ? '%Y-%m-%d' :
+                                       groupBy === 'month' ? '%Y-%m' : '%Y-%m-%d',
+                                date: '$transactions.createdAt'
+                            }
+                        },
+                        type: '$transactions.type'
+                    },
+                    total: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ['$transactions.type', 'deposit'] },
+                                        { $ne: ['$transactions.isBonus', true] }
+                                    ]
+                                },
+                                '$transactions.amount',
+                                {
+                                    $cond: [
+                                        { $eq: ['$transactions.type', 'withdrawal'] },
+                                        '$transactions.amount',
+                                        0
+                                    ]
+                                }
+                            ]
+                        }
                     }
-                });
-            }
-        });
+                }
+            },
+            {
+                $group: {
+                    _id: '$_id.date',
+                    deposits: {
+                        $sum: {
+                            $cond: [{ $eq: ['$_id.type', 'deposit'] }, '$total', 0]
+                        }
+                    },
+                    withdrawals: {
+                        $sum: {
+                            $cond: [{ $eq: ['$_id.type', 'withdrawal'] }, '$total', 0]
+                        }
+                    }
+                }
+            },
+            { $sort: { _id: 1 } }
+        ]);
 
-        // Convert to array format for charts
-        const allDates = new Set([...Object.keys(deposits), ...Object.keys(withdrawals)]);
-        const sortedDates = Array.from(allDates).sort();
-
-        sortedDates.forEach(date => {
-            chartData.push({
-                date,
-                deposits: deposits[date] || 0,
-                withdrawals: withdrawals[date] || 0,
-                net: (deposits[date] || 0) - (withdrawals[date] || 0)
-            });
-        });
+        // Format chart data
+        const chartData = chartDataResult.map(item => ({
+            date: item._id,
+            deposits: item.deposits,
+            withdrawals: item.withdrawals,
+            net: item.deposits - item.withdrawals
+        }));
 
         // Calculate summary
         const summary = {
-            totalDeposits: Object.values(deposits).reduce((sum, val) => sum + val, 0),
-            totalWithdrawals: Object.values(withdrawals).reduce((sum, val) => sum + val, 0),
+            totalDeposits: chartData.reduce((sum, item) => sum + item.deposits, 0),
+            totalWithdrawals: chartData.reduce((sum, item) => sum + item.withdrawals, 0),
             netRevenue: 0,
             averageDeposit: 0,
             averageWithdrawal: 0,
-            transactionCount: sortedDates.length
+            transactionCount: chartData.length
         };
 
         summary.netRevenue = summary.totalDeposits - summary.totalWithdrawals;
-        summary.averageDeposit = sortedDates.length > 0 ? summary.totalDeposits / sortedDates.length : 0;
-        summary.averageWithdrawal = sortedDates.length > 0 ? summary.totalWithdrawals / sortedDates.length : 0;
+        summary.averageDeposit = chartData.length > 0 ? summary.totalDeposits / chartData.length : 0;
+        summary.averageWithdrawal = chartData.length > 0 ? summary.totalWithdrawals / chartData.length : 0;
 
         res.json({
             success: true,
@@ -268,8 +367,26 @@ const getTransactions = async (req, res) => {
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
+        // Build match conditions
+        const matchConditions = {
+            'transactions.0': { $exists: true } // Only wallets with transactions
+        };
+
         // Build date filter
-        let dateFilter = {};
+        let transactionMatch = {};
+        
+        if (type) {
+            transactionMatch['transactions.type'] = type;
+        }
+        
+        if (status) {
+            transactionMatch['transactions.status'] = status;
+        }
+        
+        if (paymentMethod) {
+            transactionMatch['transactions.paymentMethod'] = paymentMethod;
+        }
+
         if (dateRange && dateRange !== 'all') {
             const now = new Date();
             const startDate = new Date();
@@ -286,97 +403,139 @@ const getTransactions = async (req, res) => {
                     break;
             }
 
-            dateFilter = {
+            transactionMatch['transactions.createdAt'] = {
                 $gte: startDate,
                 $lte: now
             };
         }
 
-        // Get all wallets with their transactions
-        const wallets = await Wallet.find({}).populate('userId', 'username email').lean();
+        // ✅ Use aggregation pipeline for better performance
+        const pipeline = [
+            { $match: matchConditions },
+            { $unwind: '$transactions' },
+            ...(Object.keys(transactionMatch).length > 0 ? [{ $match: transactionMatch }] : []),
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'userId',
+                    foreignField: '_id',
+                    as: 'user'
+                }
+            },
+            { $unwind: '$user' },
+            {
+                $project: {
+                    _id: '$transactions._id',
+                    transactionId: '$transactions._id',
+                    user: '$user.username',
+                    userEmail: '$user.email',
+                    userId: '$user._id',
+                    walletId: '$_id',
+                    type: '$transactions.type',
+                    amount: '$transactions.amount',
+                    netAmount: '$transactions.netAmount',
+                    fee: '$transactions.fee',
+                    status: '$transactions.status',
+                    paymentMethod: '$transactions.paymentMethod',
+                    description: '$transactions.description',
+                    createdAt: '$transactions.createdAt',
+                    completedAt: '$transactions.completedAt',
+                    failedAt: '$transactions.failedAt',
+                    external_id: '$transactions.external_id',
+                    txid: '$transactions.txid',
+                    withdrawalAddress: '$transactions.withdrawalAddress',
+                    cryptoType: '$transactions.cryptoType',
+                    cryptoAmount: '$transactions.cryptoAmount',
+                    cashappTag: '$transactions.cashappTag',
+                    cashappName: '$transactions.cashappName',
+                    chimeTag: '$transactions.chimeTag',
+                    chimeFullName: '$transactions.chimeFullName',
+                    isBonus: '$transactions.isBonus',
+                    paymentRef: '$transactions.paymentRef',
+                    balanceBefore: '$transactions.balanceBefore',
+                    balanceAfter: '$transactions.balanceAfter'
+                }
+            },
+            { $sort: { createdAt: -1 } }
+        ];
 
-        let allTransactions = [];
+        // Get total count for pagination
+        const countPipeline = [
+            ...pipeline,
+            { $count: 'total' }
+        ];
 
-        // Extract and format transactions from wallets
-        wallets.forEach(wallet => {
-            if (wallet.transactions && Array.isArray(wallet.transactions)) {
-                wallet.transactions.forEach(tx => {
-                    // Apply filters
-                    let includeTransaction = true;
+        const [countResult, transactions] = await Promise.all([
+            Wallet.aggregate(countPipeline),
+            Wallet.aggregate([
+                ...pipeline,
+                { $skip: skip },
+                { $limit: parseInt(limit) }
+            ])
+        ]);
 
-                    if (type && tx.type !== type) includeTransaction = false;
-                    if (status && tx.status !== status) includeTransaction = false;
-                    if (paymentMethod && tx.paymentMethod !== paymentMethod) includeTransaction = false;
+        const totalTransactions = countResult[0]?.total || 0;
 
-                    if (dateFilter.$gte) {
-                        const txDate = new Date(tx.createdAt);
-                        if (txDate < dateFilter.$gte || txDate > dateFilter.$lte) {
-                            includeTransaction = false;
+        // ✅ Calculate stats from aggregation (only for filtered results)
+        const statsMatch = { ...transactionMatch };
+        delete statsMatch['transactions.createdAt']; // Remove date filter for overall stats
+
+        const statsResult = await Wallet.aggregate([
+            { $match: matchConditions },
+            { $unwind: '$transactions' },
+            ...(Object.keys(statsMatch).length > 0 ? [{ $match: statsMatch }] : []),
+            {
+                $group: {
+                    _id: null,
+                    totalDeposits: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ['$transactions.type', 'deposit'] },
+                                        { $eq: ['$transactions.status', 'completed'] },
+                                        { $ne: ['$transactions.isBonus', true] }
+                                    ]
+                                },
+                                '$transactions.amount',
+                                0
+                            ]
+                        }
+                    },
+                    totalWithdrawals: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ['$transactions.type', 'withdrawal'] },
+                                        { $eq: ['$transactions.status', 'completed'] }
+                                    ]
+                                },
+                                '$transactions.amount',
+                                0
+                            ]
+                        }
+                    },
+                    pendingCount: {
+                        $sum: {
+                            $cond: [{ $eq: ['$transactions.status', 'pending'] }, 1, 0]
+                        }
+                    },
+                    completedCount: {
+                        $sum: {
+                            $cond: [{ $eq: ['$transactions.status', 'completed'] }, 1, 0]
+                        }
+                    },
+                    failedCount: {
+                        $sum: {
+                            $cond: [{ $eq: ['$transactions.status', 'failed'] }, 1, 0]
                         }
                     }
-
-                    if (includeTransaction) {
-                        // Calculate risk level
-                        let riskLevel = 'low';
-                        if (tx.amount > 1000) riskLevel = 'high';
-                        else if (tx.amount > 500) riskLevel = 'medium';
-                        if (tx.status === 'failed') riskLevel = 'high';
-                        if (tx.paymentMethod === 'crypto' && tx.amount > 100) riskLevel = 'medium';
-
-                        // ✅ Build complete transaction object with ALL withdrawal details
-                        allTransactions.push({
-                            _id: tx._id,
-                            transactionId: tx._id?.toString(),
-                            user: wallet.userId?.username || 'Unknown',
-                            userEmail: wallet.userId?.email || '',
-                            userId: wallet.userId?._id || wallet.userId,
-                            walletId: wallet._id,
-                            type: tx.type,
-                            amount: tx.amount,
-                            netAmount: tx.netAmount,
-                            fee: tx.fee || 0,
-                            status: tx.status,
-                            paymentMethod: tx.paymentMethod || 'N/A',
-                            description: tx.description,
-                            createdAt: tx.createdAt,
-                            completedAt: tx.completedAt,
-                            failedAt: tx.failedAt,
-                            external_id: tx.external_id,
-                            txid: tx.txid,
-                            
-                            // ✅ Crypto withdrawal details
-                            withdrawalAddress: tx.withdrawalAddress,
-                            cryptoType: tx.cryptoType,
-                            cryptoAmount: tx.cryptoAmount,
-                            
-                            // ✅ CashApp withdrawal details
-                            cashappTag: tx.cashappTag,
-                            cashappName: tx.cashappName,
-                            
-                            // ✅ Chime withdrawal details
-                            chimeTag: tx.chimeTag,
-                            chimeFullName: tx.chimeFullName,
-                            
-                            // ✅ Bonus flag
-                            isBonus: tx.isBonus || false,
-                            
-                            paymentRef: tx.paymentRef,
-                            riskLevel: riskLevel,
-                            timeAgo: getTimeAgo(tx.createdAt),
-                            direction: ['deposit', 'game_withdrawal', 'bonus', 'refund'].includes(tx.type) ? 'in' : 'out',
-                            balanceBefore: tx.balanceBefore || 0,
-                            balanceAfter: tx.balanceAfter || 0
-                        });
-                    }
-                });
+                }
             }
-        });
+        ]);
 
-        // Sort by date (most recent first)
-        allTransactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-        // ✅ FIXED: Calculate stats for all transactions (before pagination) - only count REAL deposits
-        const stats = {
+        const stats = statsResult[0] || {
             totalDeposits: 0,
             totalWithdrawals: 0,
             pendingCount: 0,
@@ -384,34 +543,32 @@ const getTransactions = async (req, res) => {
             failedCount: 0
         };
 
-        allTransactions.forEach(tx => {
-            if (tx.status === 'completed') {
-                // ✅ FIXED: Only count REAL deposits (isBonus === false)
-                if (tx.type === 'deposit' && tx.isBonus === false) {
-                    stats.totalDeposits += tx.netAmount || tx.amount || 0;
-                } else if (tx.type === 'withdrawal') {
-                    stats.totalWithdrawals += tx.amount || 0;
-                }
-                stats.completedCount++;
-            } else if (tx.status === 'pending') {
-                stats.pendingCount++;
-            } else if (tx.status === 'failed') {
-                stats.failedCount++;
-            }
-        });
+        // Format transactions with additional data
+        const formattedTransactions = transactions.map(tx => {
+            // Calculate risk level
+            let riskLevel = 'low';
+            if (tx.amount > 1000) riskLevel = 'high';
+            else if (tx.amount > 500) riskLevel = 'medium';
+            if (tx.status === 'failed') riskLevel = 'high';
+            if (tx.paymentMethod === 'crypto' && tx.amount > 100) riskLevel = 'medium';
 
-        // Apply pagination
-        const paginatedTransactions = allTransactions.slice(skip, skip + parseInt(limit));
+            return {
+                ...tx,
+                riskLevel,
+                timeAgo: getTimeAgo(tx.createdAt),
+                direction: ['deposit', 'game_withdrawal', 'bonus', 'refund'].includes(tx.type) ? 'in' : 'out'
+            };
+        });
 
         res.json({
             success: true,
             data: {
-                transactions: paginatedTransactions,
+                transactions: formattedTransactions,
                 stats,
                 pagination: {
                     currentPage: parseInt(page),
-                    totalPages: Math.ceil(allTransactions.length / parseInt(limit)),
-                    totalTransactions: allTransactions.length,
+                    totalPages: Math.ceil(totalTransactions / parseInt(limit)),
+                    totalTransactions,
                     limit: parseInt(limit)
                 }
             }
@@ -978,16 +1135,16 @@ const getUsers = async (req, res) => {
         const { page = 1, limit = 20, search, status } = req.query;
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
-        // ✅ BUILD QUERY WITH IP SEARCH SUPPORT
+        // ✅ Build query with IP search support
         let query = {};
         
         if (search) {
             query.$or = [
                 { username: { $regex: search, $options: 'i' } },
                 { email: { $regex: search, $options: 'i' } },
-                { 'profile.email': { $regex: search, $options: 'i' } }, // ✅ Added
-                { 'account.signupIP': { $regex: search, $options: 'i' } }, // ✅ Added
-                { 'account.lastLoginIP': { $regex: search, $options: 'i' } } // ✅ Added
+                { 'profile.email': { $regex: search, $options: 'i' } },
+                { 'account.signupIP': { $regex: search, $options: 'i' } },
+                { 'account.lastLoginIP': { $regex: search, $options: 'i' } }
             ];
         }
         
@@ -999,34 +1156,68 @@ const getUsers = async (req, res) => {
             }
         }
 
-        // ✅ FETCH USERS WITH ACCOUNT FIELDS (INCLUDING IP DATA)
-        const users = await User.find(query)
-            .select('username email createdAt account profile') // ✅ Include account field
-            .skip(skip)
-            .limit(parseInt(limit))
-            .sort({ createdAt: -1 })
-            .lean();
+        // ✅ Use aggregation pipeline to join wallet data efficiently
+        const pipeline = [
+            { $match: query },
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $unwind: {
+                    path: '$wallet',
+                    preserveNullAndEmptyArrays: true
+                }
+            },
+            {
+                $project: {
+                    username: 1,
+                    email: 1,
+                    createdAt: 1,
+                    account: 1,
+                    profile: 1,
+                    'wallet.balance': 1,
+                    'wallet.availableBalance': 1,
+                    'wallet.pendingBalance': 1
+                }
+            },
+            { $sort: { createdAt: -1 } }
+        ];
 
-        // Get wallet balance for each user
-        const usersWithWallets = await Promise.all(
-            users.map(async (user) => {
-                const wallet = await Wallet.findOne({ userId: user._id }).lean();
-                return {
-                    ...user,
-                    wallet: wallet ? {
-                        balance: wallet.balance || 0,
-                        availableBalance: wallet.availableBalance || 0,
-                        pendingBalance: wallet.pendingBalance || 0
-                    } : {
-                        balance: 0,
-                        availableBalance: 0,
-                        pendingBalance: 0
-                    }
-                };
-            })
-        );
+        // Get total count for pagination
+        const countPipeline = [
+            { $match: query },
+            { $count: 'total' }
+        ];
 
-        const totalUsers = await User.countDocuments(query);
+        const [countResult, users] = await Promise.all([
+            User.aggregate(countPipeline),
+            User.aggregate([
+                ...pipeline,
+                { $skip: skip },
+                { $limit: parseInt(limit) }
+            ])
+        ]);
+
+        const totalUsers = countResult[0]?.total || 0;
+
+        // Format the response
+        const usersWithWallets = users.map(user => ({
+            ...user,
+            wallet: user.wallet ? {
+                balance: user.wallet.balance || 0,
+                availableBalance: user.wallet.availableBalance || 0,
+                pendingBalance: user.wallet.pendingBalance || 0
+            } : {
+                balance: 0,
+                availableBalance: 0,
+                pendingBalance: 0
+            }
+        }));
 
         res.json({
             success: true,
@@ -1777,79 +1968,116 @@ const getUserDetails = async (req, res) => {
     try {
         const { userId } = req.params;
 
-        const user = await User.findById(userId)
-            .select('username email createdAt account profile')
-            .lean();
+        // ✅ Use aggregation to fetch user with wallet and stats in one query
+        const userResult = await User.aggregate([
+            { $match: { _id: mongoose.Types.ObjectId(userId) } },
+            {
+                $lookup: {
+                    from: 'wallets',
+                    localField: '_id',
+                    foreignField: 'userId',
+                    as: 'wallet'
+                }
+            },
+            {
+                $unwind: {
+                    path: '$wallet',
+                    preserveNullAndEmptyArrays: true
+                }
+            },
+            {
+                $project: {
+                    username: 1,
+                    email: 1,
+                    createdAt: 1,
+                    account: 1,
+                    profile: 1,
+                    'wallet._id': 1,
+                    'wallet.balance': 1,
+                    'wallet.bonusBalance': 1,
+                    'wallet.availableBalance': 1,
+                    'wallet.availableBonusBalance': 1,
+                    'wallet.pendingBalance': 1,
+                    'wallet.transactions': 1
+                }
+            }
+        ]);
 
-        if (!user) {
+        if (!userResult || userResult.length === 0) {
             return res.status(404).json({
                 success: false,
                 message: 'User not found'
             });
         }
 
-        // Get wallet with transactions
-        const wallet = await Wallet.findOne({ userId }).lean();
+        const user = userResult[0];
 
-        // Calculate stats
-        let totalDeposits = 0;
-        let totalWithdrawals = 0;
-        let completedDeposits = 0;
-        let completedWithdrawals = 0;
-        let pendingTransactions = 0;
+        // ✅ Calculate stats from wallet transactions (only if wallet exists)
+        let stats = {
+            totalDeposits: 0,
+            totalWithdrawals: 0,
+            completedDeposits: 0,
+            completedWithdrawals: 0,
+            pendingTransactions: 0,
+            netAmount: 0,
+            gameAccountsCount: 0
+        };
 
-        if (wallet && wallet.transactions) {
-            wallet.transactions.forEach(tx => {
+        if (user.wallet && user.wallet.transactions) {
+            user.wallet.transactions.forEach(tx => {
                 if (tx.type === 'deposit') {
                     if (tx.status === 'completed') {
-                        totalDeposits += tx.amount || 0;
-                        completedDeposits++;
+                        stats.totalDeposits += tx.amount || 0;
+                        stats.completedDeposits++;
                     }
                 } else if (tx.type === 'withdrawal') {
                     if (tx.status === 'completed') {
-                        totalWithdrawals += tx.amount || 0;
-                        completedWithdrawals++;
+                        stats.totalWithdrawals += tx.amount || 0;
+                        stats.completedWithdrawals++;
                     } else if (tx.status === 'pending') {
-                        pendingTransactions++;
+                        stats.pendingTransactions++;
                     }
                 }
             });
+            stats.netAmount = stats.totalDeposits - stats.totalWithdrawals;
         }
 
-        // Get game accounts
+        // ✅ Get game accounts count (separate query, but only count)
         const GameAccount = require('../models/GameAccount');
-        const gameAccounts = await GameAccount.find({ userId })
+        stats.gameAccountsCount = await GameAccount.countDocuments({ userId: user._id });
+
+        // ✅ Get game accounts (only if needed, limited to 10)
+        const gameAccounts = await GameAccount.find({ userId: user._id })
             .populate('gameId', 'name slug')
+            .limit(10)
             .lean();
+
+        // Format response
+        const userResponse = {
+            ...user,
+            wallet: user.wallet ? {
+                balance: user.wallet.balance || 0,
+                bonusBalance: user.wallet.bonusBalance || 0,
+                availableBalance: user.wallet.availableBalance || 0,
+                availableBonusBalance: user.wallet.availableBonusBalance || 0,
+                pendingBalance: user.wallet.pendingBalance || 0
+            } : {
+                balance: 0,
+                bonusBalance: 0,
+                availableBalance: 0,
+                availableBonusBalance: 0,
+                pendingBalance: 0
+            }
+        };
+
+        // Remove transactions from response (we only needed them for stats)
+        delete userResponse.wallet.transactions;
 
         res.json({
             success: true,
             data: {
-                user: {
-                    ...user,
-                    wallet: wallet ? {
-                        balance: wallet.balance || 0,
-                        bonusBalance: wallet.bonusBalance || 0,  // ✅ Added
-                        availableBalance: wallet.availableBalance || 0,
-                        availableBonusBalance: wallet.availableBonusBalance || 0,  // ✅ Added
-                        pendingBalance: wallet.pendingBalance || 0
-                    } : {
-                        balance: 0,
-                        bonusBalance: 0,  // ✅ Added
-                        availableBalance: 0,
-                        availableBonusBalance: 0,  // ✅ Added
-                        pendingBalance: 0
-                    }
-                },
-                stats: {
-                    totalDeposits,
-                    totalWithdrawals,
-                    completedDeposits,
-                    completedWithdrawals,
-                    pendingTransactions,
-                    netAmount: totalDeposits - totalWithdrawals,
-                    gameAccountsCount: gameAccounts.length
-                },
+                user: userResponse,
+                stats,
                 gameAccounts
             }
         });

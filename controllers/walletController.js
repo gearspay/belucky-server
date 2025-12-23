@@ -682,52 +682,91 @@ const updateWalletSettings = async (req, res) => {
     }
 };
 
-// Get recent winners
 const getRecentWinners = async (req, res) => {
     try {
-        const User = require('../models/User');
         const Game = require('../models/Game');
+        const Wallet = require('../models/Wallet');
+        const GameAccount = require('../models/GameAccount');
         
-        const wallets = await Wallet.find({
-            'transactions.type': 'game_withdrawal',
-            'transactions.status': 'completed'
-        }).populate('userId', 'username email');
-        
-        const allWinners = [];
-        
-        for (const wallet of wallets) {
-            const gameWithdrawals = wallet.transactions
-                .filter(t => t.type === 'game_withdrawal' && t.status === 'completed')
-                .map(t => ({
-                    username: wallet.userId?.username || 'Anonymous',
-                    email: wallet.userId?.email || '',
-                    amount: t.netAmount || t.amount,
-                    gameAccountId: t.gameDetails?.gameAccountId || t.referenceId,
-                    gameType: t.gameDetails?.gameType || 'Unknown',
-                    gameLogin: t.gameDetails?.gameLogin || '',
-                    createdAt: t.createdAt,
-                    transactionId: t._id
-                }));
-            
-            allWinners.push(...gameWithdrawals);
-        }
-        
-        const topWinners = allWinners
-            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-            .slice(0, 10);
-        
+        // ✅ Use aggregation to get recent winners efficiently
+        const recentWinners = await Wallet.aggregate([
+            // Only get wallets that have game withdrawals
+            {
+                $match: {
+                    'transactions.type': 'game_withdrawal',
+                    'transactions.status': 'completed'
+                }
+            },
+            // Unwind transactions
+            { $unwind: '$transactions' },
+            // Filter for completed game withdrawals
+            {
+                $match: {
+                    'transactions.type': 'game_withdrawal',
+                    'transactions.status': 'completed'
+                }
+            },
+            // Join with users
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'userId',
+                    foreignField: '_id',
+                    as: 'user'
+                }
+            },
+            { $unwind: '$user' },
+            // Project only needed fields
+            {
+                $project: {
+                    username: '$user.username',
+                    email: '$user.email',
+                    amount: {
+                        $ifNull: ['$transactions.netAmount', '$transactions.amount']
+                    },
+                    gameAccountId: {
+                        $ifNull: [
+                            '$transactions.gameDetails.gameAccountId',
+                            '$transactions.referenceId'
+                        ]
+                    },
+                    gameType: {
+                        $ifNull: [
+                            '$transactions.gameDetails.gameType',
+                            'Unknown'
+                        ]
+                    },
+                    gameLogin: {
+                        $ifNull: [
+                            '$transactions.gameDetails.gameLogin',
+                            ''
+                        ]
+                    },
+                    createdAt: '$transactions.createdAt',
+                    transactionId: '$transactions._id'
+                }
+            },
+            // Sort by most recent
+            { $sort: { createdAt: -1 } },
+            // Limit to top 10
+            { $limit: 10 }
+        ]);
+
+        // ✅ Fetch game details for winners (only 10 queries max)
         const winnersWithImages = await Promise.all(
-            topWinners.map(async (winner) => {
+            recentWinners.map(async (winner) => {
                 let gameName = winner.gameType;
                 let gameImage = null;
                 
                 try {
+                    // Try to get from game account first
                     if (winner.gameAccountId) {
                         const gameAccount = await GameAccount.findById(winner.gameAccountId)
                             .populate({
                                 path: 'gameId',
                                 select: 'name displayName title image shortcode'
-                            });
+                            })
+                            .lean();
                         
                         if (gameAccount && gameAccount.gameId) {
                             const game = gameAccount.gameId;
@@ -736,6 +775,7 @@ const getRecentWinners = async (req, res) => {
                         }
                     }
                     
+                    // Fallback to finding game by type/name
                     if (!gameImage) {
                         const game = await Game.findOne({
                             $or: [
@@ -744,7 +784,9 @@ const getRecentWinners = async (req, res) => {
                                 { name: { $regex: new RegExp(winner.gameType, 'i') } },
                                 { slug: winner.gameType.toLowerCase() }
                             ]
-                        }).select('name displayName title image shortcode');
+                        })
+                        .select('name displayName title image shortcode')
+                        .lean();
                         
                         if (game) {
                             gameName = game.displayName || game.name || game.title || winner.gameType;
@@ -786,13 +828,12 @@ const getRecentWinners = async (req, res) => {
     }
 };
 
+// Helper function to mask username
 const maskUsername = (username) => {
-    if (!username || username.length < 3) return 'User ***';
-    
-    const firstPart = username.substring(0, Math.min(username.length - 2, Math.ceil(username.length / 2)));
-    const stars = '*'.repeat(Math.min(5, username.length - firstPart.length));
-    
-    return `${firstPart} ${stars}`;
+    if (!username || username.length <= 3) {
+        return username ? username + '***' : 'Anonymous***';
+    }
+    return username.substring(0, 3) + '***';
 };
 
 module.exports = {
