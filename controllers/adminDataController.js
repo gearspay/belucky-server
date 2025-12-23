@@ -1967,10 +1967,22 @@ const redeemFromUser = async (req, res) => {
 const getUserDetails = async (req, res) => {
     try {
         const { userId } = req.params;
+        const mongoose = require('mongoose');
+        const User = require('../models/User');
+        const Wallet = require('../models/Wallet');
+        const GameAccount = require('../models/GameAccount');
+
+        // ✅ Validate ObjectId
+        if (!mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid user ID'
+            });
+        }
 
         // ✅ Use aggregation to fetch user with wallet and stats in one query
         const userResult = await User.aggregate([
-            { $match: { _id: mongoose.Types.ObjectId(userId) } },
+            { $match: { _id: new mongoose.Types.ObjectId(userId) } },
             {
                 $lookup: {
                     from: 'wallets',
@@ -2026,7 +2038,7 @@ const getUserDetails = async (req, res) => {
         if (user.wallet && user.wallet.transactions) {
             user.wallet.transactions.forEach(tx => {
                 if (tx.type === 'deposit') {
-                    if (tx.status === 'completed') {
+                    if (tx.status === 'completed' && !tx.isBonus) {
                         stats.totalDeposits += tx.amount || 0;
                         stats.completedDeposits++;
                     }
@@ -2043,18 +2055,26 @@ const getUserDetails = async (req, res) => {
         }
 
         // ✅ Get game accounts count (separate query, but only count)
-        const GameAccount = require('../models/GameAccount');
-        stats.gameAccountsCount = await GameAccount.countDocuments({ userId: user._id });
+        stats.gameAccountsCount = await GameAccount.countDocuments({ 
+            userId: new mongoose.Types.ObjectId(userId) 
+        });
 
         // ✅ Get game accounts (only if needed, limited to 10)
-        const gameAccounts = await GameAccount.find({ userId: user._id })
+        const gameAccounts = await GameAccount.find({ 
+            userId: new mongoose.Types.ObjectId(userId) 
+        })
             .populate('gameId', 'name slug')
             .limit(10)
             .lean();
 
         // Format response
         const userResponse = {
-            ...user,
+            _id: user._id,
+            username: user.username,
+            email: user.email,
+            createdAt: user.createdAt,
+            account: user.account,
+            profile: user.profile,
             wallet: user.wallet ? {
                 balance: user.wallet.balance || 0,
                 bonusBalance: user.wallet.bonusBalance || 0,
@@ -2069,9 +2089,6 @@ const getUserDetails = async (req, res) => {
                 pendingBalance: 0
             }
         };
-
-        // Remove transactions from response (we only needed them for stats)
-        delete userResponse.wallet.transactions;
 
         res.json({
             success: true,
