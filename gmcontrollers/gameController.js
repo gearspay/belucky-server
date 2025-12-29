@@ -1133,22 +1133,29 @@ const getDownloadCode = async (req, res) => {
 };
 
 // Reset account password - Uses specific game controller
+// Reset account password - Uses specific game controller
 const resetAccountPassword = async (req, res) => {
   try {
     const userId = req.user.userId;
     const { slug, accountId } = req.params;
-    // const { newPassword, confirmPassword } = req.body;
 
     const generateRandomString = () => {
-                    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-                    let result = '';
-                    for (let i = 0; i < 4; i++) {
-                        result += chars.charAt(Math.floor(Math.random() * chars.length));
-                    }
-                    return result;
-                };
-                
-    const newPassword = `bc${generateRandomString()}_${generateRandomString()}`;
+      const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+      let result = '';
+      for (let i = 0; i < 4; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return result;
+    };
+    
+    // ✅ FIXED: Generate 6-16 char password with letters, numbers, and allowed symbols
+    // Format: Bc + 6 random chars + 2-3 digits + !
+    // Example: "Bca4k2x7943!" (12 chars) - valid!
+    const randomChars = generateRandomString() + generateRandomString().substring(0, 2); // 6 chars
+    const randomNum = Math.floor(Math.random() * 999) + 1; // 1-999 (1-3 digits)
+    const newPassword = `Bc${randomChars}${randomNum}!`;
+
+    console.log(`🔐 Generated password: ${newPassword} (${newPassword.length} chars)`);
 
     // Validation
     if (!newPassword) {
@@ -1158,10 +1165,10 @@ const resetAccountPassword = async (req, res) => {
       });
     }
 
-    if (newPassword.length < 6) {
+    if (newPassword.length < 6 || newPassword.length > 16) {
       return res.status(400).json({
         success: false,
-        message: 'Password must be at least 6 characters long'
+        message: 'Password must be 6-16 characters long'
       });
     }
 
@@ -1179,7 +1186,7 @@ const resetAccountPassword = async (req, res) => {
 
     const { game, controller } = await loadGameController(slug);
 
-    // Call the controller's resetAccountPassword method (NOT resetPassword)
+    // Call the controller's resetAccountPassword method
     const result = await controller.resetAccountPassword(
       userId, 
       gameAccount.gameLogin, 
