@@ -203,6 +203,9 @@ const verifyOTP = async (req, res) => {
 // controllers/authController.js - COMPLETE REGISTER FUNCTION
 // Replace your entire register function with this
 
+// ========================================
+// REGISTER WITH IP DUPLICATE DETECTION
+// ========================================
 const register = async (req, res) => {
   const role = 2;
   const { username, password, email, affiliateUsername } = req.body;
@@ -234,6 +237,30 @@ const register = async (req, res) => {
   console.log(`📍 Registration from IP: ${clientIP}, User-Agent: ${req.get('User-Agent')}`);
 
   try {
+    // ========================================
+    // ✅ CHECK FOR MULTIPLE ACCOUNTS FROM SAME IP
+    // ========================================
+    // Skip localhost/development IPs from this check
+    const isLocalhost = clientIP === '127.0.0.1' || clientIP === 'localhost' || clientIP === '::1';
+    
+    if (!isLocalhost) {
+      const existingAccountsFromIP = await User.countDocuments({
+        'account.signupIP': clientIP
+      });
+
+      if (existingAccountsFromIP >= 2) {
+        console.log(`⚠️  Multiple account attempt blocked - IP: ${clientIP} has ${existingAccountsFromIP} accounts`);
+        return res.status(403).json({
+          success: false,
+          message: 'You have multiple accounts from the same device. Please contact support if you believe this is an error.'
+        });
+      }
+      
+      console.log(`✅ IP check passed - ${existingAccountsFromIP} existing account(s) from IP: ${clientIP}`);
+    } else {
+      console.log(`ℹ️  Localhost detected - skipping IP duplicate check`);
+    }
+
     const verifiedOTP = await OTP.findOne({
       email: lowercaseEmail,
       purpose: 'registration',
@@ -295,7 +322,7 @@ const register = async (req, res) => {
 
     const newUser = await user.save();
 
-    console.log(`✅ User registered: ${username} from IP: ${clientIP}`);
+    console.log(`✅ User registered: ${username} from IP: ${clientIP} (Total accounts from this IP: ${existingAccountsFromIP + 1})`);
 
     // Add user to Mailtrap contact list for future bulk campaigns
     await emailService.addToMailtrapContactList(lowercaseEmail, username);
