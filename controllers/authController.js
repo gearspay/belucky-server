@@ -206,6 +206,9 @@ const verifyOTP = async (req, res) => {
 // ========================================
 // REGISTER WITH IP DUPLICATE DETECTION
 // ========================================
+// ========================================
+// REGISTER WITH IP DUPLICATE DETECTION
+// ========================================
 const register = async (req, res) => {
   const role = 2;
   const { username, password, email, affiliateUsername } = req.body;
@@ -243,8 +246,10 @@ const register = async (req, res) => {
     // Skip localhost/development IPs from this check
     const isLocalhost = clientIP === '127.0.0.1' || clientIP === 'localhost' || clientIP === '::1';
     
+    let existingAccountsFromIP = 0;
+    
     if (!isLocalhost) {
-      const existingAccountsFromIP = await User.countDocuments({
+      existingAccountsFromIP = await User.countDocuments({
         'account.signupIP': clientIP
       });
 
