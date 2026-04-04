@@ -1779,12 +1779,14 @@ const autoVerifyChimePayments = async () => {
         console.log('\n🔍 Searching for pending Chime deposit transactions...');
         
         const Wallet = require('../models/Wallet');
+
+        // ✅ GUARD 1 - Query level: never fetch wallets with only withdrawals
         const walletsWithPending = await Wallet.find({
             'transactions': {
                 $elemMatch: {
                     paymentMethod: 'chime',
                     status: 'pending',
-                    type: 'deposit'  // ✅ Only deposits, never withdrawals
+                    type: { $ne: 'withdrawal' }
                 }
             }
         });
@@ -1830,14 +1832,18 @@ const autoVerifyChimePayments = async () => {
 
         // Process each wallet
         for (const wallet of walletsWithPending) {
-            // ✅ Only process pending DEPOSIT transactions for Chime
+
+            // ✅ GUARD 2 - Filter level: never touch withdrawals
             const pendingTransactions = wallet.transactions.filter(t =>
                 t.paymentMethod === 'chime' &&
                 t.status === 'pending' &&
-                t.type === 'deposit'  // ✅ Only deposits, never withdrawals
+                t.type !== 'withdrawal'
             );
 
-            if (pendingTransactions.length === 0) continue;
+            if (pendingTransactions.length === 0) {
+                console.log(`\n💼 Wallet ${wallet.userId} - no deposit transactions after filter, skipping`);
+                continue;
+            }
 
             console.log(`\n💼 ─────────────────────────────────────────────────`);
             console.log(`💼 Wallet: ${wallet.userId}`);
@@ -1854,7 +1860,14 @@ const autoVerifyChimePayments = async () => {
                     console.log(`     Amount: $${transaction.amount}`);
                     console.log(`     Created: ${transaction.createdAt}`);
 
-                    // Check if transaction is expired (30 minutes)
+                    // ✅ GUARD 3 - Timer level: only expire deposits
+                    if (transaction.type !== 'deposit') {
+                        console.log(`     ⏭️  Skipping - not a deposit (type: ${transaction.type})`);
+                        skippedCount++;
+                        continue;
+                    }
+
+                    // Check if transaction is expired (30 minutes) - DEPOSITS ONLY
                     const transactionDate = new Date(transaction.createdAt);
                     const now = new Date();
                     const timeDiffMinutes = (now - transactionDate) / 1000 / 60;
@@ -1918,7 +1931,7 @@ const autoVerifyChimePayments = async () => {
                         const amountMatches = paymentDetails.amount &&
                                             Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
 
-                        // 2. IMPROVED NAME MATCHING - Using helper function
+                        // 2. Name matching
                         const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
 
                         // 3. Date match (after transaction, within 30 minutes)
@@ -1933,7 +1946,6 @@ const autoVerifyChimePayments = async () => {
                         if (amountMatches && nameMatches && dateMatches) {
                             console.log('        🎉 MATCH FOUND!');
                             
-                            // Mark as completed
                             const metadata = {
                                 senderName: paymentDetails.senderName,
                                 amount: paymentDetails.amount,
@@ -1998,8 +2010,8 @@ const autoVerifyChimePayments = async () => {
         console.log(`   ✅ Verified: ${verifiedCount} deposit(s)`);
         console.log(`   ⏰ Expired: ${expiredCount} deposit(s)`);
         console.log(`   ⏳ Still pending: ${checkedCount - verifiedCount - expiredCount} deposit(s)`);
-        console.log(`   ⚠️  Skipped: ${skippedCount} deposit(s)`);
-        console.log(`   📝 Total checked: ${checkedCount} deposit(s)`);
+        console.log(`   ⚠️  Skipped: ${skippedCount} transaction(s)`);
+        console.log(`   📝 Total checked: ${checkedCount} transaction(s)`);
         console.log('📊 ═══════════════════════════════════════════════════');
         console.log('🔄 AUTO-VERIFY CHIME PAYMENTS CRON JOB COMPLETE');
         console.log('🔄 ═══════════════════════════════════════════════════\n');
