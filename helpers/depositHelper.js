@@ -1,9 +1,8 @@
-// helpers/depositHelper.js - COMPLETE WITH REFERRAL PROCESSING
+// helpers/depositHelper.js - COMPLETE WITH REFERRAL PROCESSING + METADATA DEDUP
 const Wallet = require('../models/Wallet');
 const Settings = require('../models/Settings');
 const axios = require('axios');
 
-// ✅ IMPORT THE REFERRAL PROCESSOR
 const { processDepositReferral } = require('../controllers/referralController');
 
 const sendTelegramNotification = async (data) => {
@@ -48,7 +47,7 @@ const sendTelegramNotification = async (data) => {
         }
 
         const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-        
+
         await axios.post(url, {
             chat_id: CHAT_ID,
             text: message,
@@ -66,7 +65,7 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
     console.log('\n🔧 ═══════════════════════════════════════════════════');
     console.log('💰 DEPOSIT COMPLETION WITH BONUS HELPER');
     console.log('🔧 ═══════════════════════════════════════════════════');
-    
+
     try {
         const {
             completedBy = 'System',
@@ -101,6 +100,28 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
             throw new Error(`Transaction is already ${transaction.status}`);
         }
 
+        // ✅ DEDUP GUARD (in-helper, synchronous): if a messageId is supplied, ensure no
+        // other completed transaction in THIS wallet already used it. This is the primary
+        // write-time guard that prevents one Chime email from settling two pending
+        // requests for the same user. Uniqueness is enforced here in app code (not via a
+        // DB unique index) to avoid array-subdocument index collisions on the many
+        // transactions that legitimately carry no messageId.
+        if (metadata && metadata.messageId) {
+            const dup = wallet.transactions.find(t =>
+                t._id.toString() !== transactionId.toString() &&
+                t.status === 'completed' &&
+                t.metadata &&
+                t.metadata.messageId === metadata.messageId
+            );
+
+            if (dup) {
+                console.log(`🚫 messageId ${metadata.messageId} already credited by transaction ${dup._id} - aborting duplicate completion`);
+                const err = new Error('DUPLICATE_MESSAGE_ID');
+                err.code = 'DUPLICATE_MESSAGE_ID';
+                throw err;
+            }
+        }
+
         const depositAmount = transaction.amount;
 
         console.log('\n💰 Balance State BEFORE:');
@@ -112,7 +133,7 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
         // Mark transaction as completed
         transaction.status = 'completed';
         transaction.completedAt = new Date();
-        transaction.description = transaction.description 
+        transaction.description = transaction.description
             ? `${transaction.description} - Completed by ${completedBy}`
             : `${transaction.paymentMethod || 'Deposit'} - Completed by ${completedBy}`;
 
@@ -126,12 +147,23 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
             isManual,
             ...metadata
         };
-        
+
         if (adminNotes) {
             txMetadata.adminNotes = adminNotes;
         }
-        
+
+        // Human-readable/debug blob (unchanged behavior)
         transaction.notes = JSON.stringify(txMetadata);
+
+        // ✅ Persist passed metadata as STRUCTURED, QUERYABLE data on the transaction
+        // (notes is a string and can't be queried). This is what makes the in-helper
+        // dedup check above and the Chime-side Guard 1/Guard 2 actually work.
+        transaction.metadata = {
+            ...(transaction.metadata || {}),
+            ...metadata
+        };
+        // metadata is a Mixed field — mark dirty so Mongoose persists the change.
+        transaction.markModified('metadata');
 
         // Add deposit to MAIN balance
         wallet.balance += depositAmount;
@@ -141,10 +173,9 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
 
         let bonusInfo = null;
 
-        // Check for FIRST DEPOSIT BONUS
         const completedDepositsCount = wallet.transactions.filter(
-            t => t._id.toString() !== transactionId.toString() && 
-                 t.type === 'deposit' && 
+            t => t._id.toString() !== transactionId.toString() &&
+                 t.type === 'deposit' &&
                  t.status === 'completed' &&
                  !t.isBonus
         ).length;
@@ -153,21 +184,21 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
 
         if (completedDepositsCount === 0) {
             console.log('   ✅ This is the FIRST deposit - checking first deposit bonus...');
-            
+
             const settings = await Settings.getSettings();
-            
+
             if (settings.firstDepositBonus.enabled) {
                 if (depositAmount >= settings.firstDepositBonus.minDeposit) {
                     let bonusAmount = (depositAmount * settings.firstDepositBonus.percentage) / 100;
-                    
+
                     if (settings.firstDepositBonus.maxBonus && bonusAmount > settings.firstDepositBonus.maxBonus) {
                         bonusAmount = settings.firstDepositBonus.maxBonus;
                     }
-                    
+
                     console.log(`   🎉 First Deposit Bonus: ${settings.firstDepositBonus.percentage}% = $${bonusAmount}`);
-                    
+
                     wallet.balance += bonusAmount;
-                    
+
                     wallet.transactions.push({
                         type: 'deposit',
                         amount: bonusAmount,
@@ -189,14 +220,14 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
                             relatedDepositId: transactionId
                         }
                     });
-                    
+
                     bonusInfo = {
                         type: 'first_deposit',
                         amount: bonusAmount,
                         percentage: settings.firstDepositBonus.percentage,
                         description: `${settings.firstDepositBonus.percentage}% First Deposit Bonus`
                     };
-                    
+
                     console.log(`   ✅ Added $${bonusAmount} to MAIN balance`);
                 } else {
                     console.log(`   ❌ Deposit below minimum ($${settings.firstDepositBonus.minDeposit})`);
@@ -206,21 +237,21 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
             }
         } else {
             console.log('   ℹ️  Not first deposit - checking promotional bonus...');
-            
+
             const settings = await Settings.getSettings();
             const activeBonus = settings.getActivePromotionalBonus();
-            
+
             if (activeBonus && depositAmount >= activeBonus.minDeposit) {
                 let bonusAmount = (depositAmount * activeBonus.bonusPercentage) / 100;
-                
+
                 if (activeBonus.maxBonus && bonusAmount > activeBonus.maxBonus) {
                     bonusAmount = activeBonus.maxBonus;
                 }
-                
+
                 console.log(`   🎉 Promotional Bonus: ${activeBonus.bonusPercentage}% = $${bonusAmount}`);
-                
+
                 wallet.balance += bonusAmount;
-                
+
                 wallet.transactions.push({
                     type: 'deposit',
                     amount: bonusAmount,
@@ -244,14 +275,14 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
                         relatedDepositId: transactionId
                     }
                 });
-                
+
                 bonusInfo = {
                     type: 'promotional',
                     amount: bonusAmount,
                     percentage: activeBonus.bonusPercentage,
                     description: activeBonus.title
                 };
-                
+
                 console.log(`   ✅ Added $${bonusAmount} to MAIN balance`);
             } else {
                 console.log('   ❌ No active promotional bonus');
@@ -260,7 +291,6 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
 
         wallet.updateAvailableBalance();
 
-        // ✅ Save wallet BEFORE processing referral
         await wallet.save();
 
         console.log('\n💰 Balance State AFTER Bonuses:');
@@ -269,14 +299,14 @@ const completeDepositWithBonus = async (walletId, transactionId, options = {}) =
         console.log('   Available:', wallet.availableBalance);
         console.log('   Pending:', wallet.pendingBalance);
 
-        // ✅ CRITICAL: PROCESS REFERRAL REWARD
+        // ✅ PROCESS REFERRAL REWARD
         let referralInfo = null;
         try {
             console.log('\n👥 Processing referral rewards...');
             console.log(`   Calling processDepositReferral(${wallet.userId._id}, ${depositAmount})`);
-            
+
             const referralResult = await processDepositReferral(wallet.userId._id, depositAmount);
-            
+
             if (referralResult.success) {
                 referralInfo = {
                     referrerUsername: referralResult.referrerUsername || 'User',

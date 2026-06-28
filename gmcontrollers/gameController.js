@@ -421,7 +421,7 @@ const rechargeAccount = async (req, res) => {
     console.log(`✅ Game loaded: ${game.name} (${game.gameType})`);
     
     const isBonusDeposit = isBonus === true;
-    const bonusAmount = Math.floor(amount * 0.1);
+    const bonusAmount = 0;
     const totalAmountToGame = amount + bonusAmount;
 
     console.log(`\n💰 Calculation:`);

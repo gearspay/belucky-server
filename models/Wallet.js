@@ -209,6 +209,12 @@ walletSchema.index({ 'transactions.status': 1 });
 walletSchema.index({ 'transactions.isBonus': 1 });
 walletSchema.index({ 'transactions.gameDetails.gameAccountId': 1 });
 
+// ✅ Speeds up messageId dedup lookups (Chime Guard 2). NOT unique — uniqueness is
+// enforced in application code (in-helper duplicate check + Chime Guard 1/Guard 2) to
+// avoid array-subdocument unique-index collisions on the many transactions that carry
+// no messageId (bonuses, crypto/cashapp deposits, withdrawals, game transactions).
+walletSchema.index({ 'transactions.metadata.messageId': 1 });
+
 // Virtual for total available balance
 walletSchema.virtual('totalAvailableBalance').get(function() {
     return this.availableBalance + this.availableBonusBalance;
@@ -359,7 +365,6 @@ walletSchema.methods.getLastGameDeposit = function(gameAccountId) {
     return deposits.length > 0 ? deposits[0] : null;
 };
 
-// ✅ FIXED: Method to update transaction status
 // ✅ FIXED: Method to update transaction status
 walletSchema.methods.updateTransactionStatus = function(transactionId, status, notes) {
     const transaction = this.transactions.id(transactionId);

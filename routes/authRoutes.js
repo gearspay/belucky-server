@@ -1,21 +1,23 @@
 // routes/authRoutes.js
 const express = require('express');
 const {
-  sendOTP,          // ✅ NEW
-  verifyOTP,        // ✅ NEW
+  sendOTP,
+  verifyOTP,
   register,
   login,
   changePassword,
   changePin,
   getCurrentUser,
-  updateProfile
+  updateProfile,
+  sendPasswordResetOTP, // ✅ NEW
+  resetPassword         // ✅ NEW
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
 
 // ========================================
-// NEW: OTP ROUTES
+// OTP ROUTES
 // ========================================
 
 // @route   POST /api/auth/send-otp
@@ -29,18 +31,40 @@ router.post('/send-otp', sendOTP);
 router.post('/verify-otp', verifyOTP);
 
 // ========================================
-// EXISTING ROUTES
+// REGISTRATION
 // ========================================
 
 // @route   POST /api/auth/register
-// @desc    Register a new user (NOW REQUIRES VERIFIED EMAIL)
+// @desc    Register a new user (REQUIRES VERIFIED EMAIL)
 // @access  Public
 router.post('/register', register);
+
+// ========================================
+// PASSWORD RESET (OTP-based)
+// ========================================
+
+// @route   POST /api/auth/forgot-password
+// @desc    Send password reset OTP to email
+// @access  Public
+router.post('/forgot-password', sendPasswordResetOTP);
+
+// @route   POST /api/auth/reset-password
+// @desc    Reset password using verified OTP
+// @access  Public
+router.post('/reset-password', resetPassword);
+
+// ========================================
+// LOGIN
+// ========================================
 
 // @route   POST /api/auth/login
 // @desc    Login user
 // @access  Public
 router.post('/login', login);
+
+// ========================================
+// PROTECTED ROUTES
+// ========================================
 
 // @route   GET /api/auth/me
 // @desc    Get current user data

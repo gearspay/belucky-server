@@ -149,7 +149,26 @@ const connectDB = async () => {
       process.env.MONGODB_URI || 'mongodb://localhost:27017/belucky-casino'
     );
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
-    
+
+    // ================================
+    // ONE-TIME INDEX MIGRATION
+    // ================================
+    // Drops the OLD unique partial index on transactions.metadata.messageId.
+    // The schema now defines a NON-unique index in its place (uniqueness is
+    // enforced in application code to avoid array-subdocument collisions).
+    // Safe + online: dropping an index does not lock the collection.
+    // IndexNotFound is swallowed so the server still boots if it's already gone.
+    // ✅ SAFE TO REMOVE this block after it has run once on production.
+    try {
+      await conn.connection.db
+        .collection('wallets')
+        .dropIndex('transactions.metadata.messageId_1');
+      console.log('✅ Dropped old unique messageId index (migration)');
+    } catch (e) {
+      // IndexNotFound (codeName) = already dropped or never existed → fine.
+      console.log('ℹ️  messageId index drop skipped:', e.codeName || e.message);
+    }
+
     // Start cron jobs after successful database connection
     startChimeVerificationJob();
     

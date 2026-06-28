@@ -1465,26 +1465,15 @@ const verifyChimePayment = async (req, res) => {
     console.log('═══════════════════════════════════════════════════');
     console.log('🔍 VERIFY CHIME PAYMENT START');
     console.log('═══════════════════════════════════════════════════');
-    
+
     try {
         const { transactionId } = req.body;
         const userId = req.user.userId;
 
-        console.log('📋 Request Details:');
-        console.log('   Transaction ID:', transactionId);
-        console.log('   User ID:', userId);
-
-        // Validate transaction ID
         if (!transactionId) {
-            console.log('❌ Validation failed: No transaction ID provided');
-            return res.status(400).json({
-                success: false,
-                message: 'Transaction ID is required'
-            });
+            return res.status(400).json({ success: false, message: 'Transaction ID is required' });
         }
 
-        // Find the wallet with pending transaction
-        console.log('\n🔍 Searching for pending transaction...');
         const Wallet = require('../models/Wallet');
         const wallet = await Wallet.findOne({
             userId,
@@ -1494,62 +1483,32 @@ const verifyChimePayment = async (req, res) => {
         });
 
         if (!wallet) {
-            console.log('❌ Pending transaction not found');
-            return res.status(404).json({
-                success: false,
-                message: 'Pending Chime transaction not found'
-            });
+            return res.status(404).json({ success: false, message: 'Pending Chime transaction not found' });
         }
 
         const transaction = wallet.transactions.id(transactionId);
-        
         if (!transaction) {
-            console.log('❌ Transaction not found in wallet');
-            return res.status(404).json({
-                success: false,
-                message: 'Transaction not found'
-            });
+            return res.status(404).json({ success: false, message: 'Transaction not found' });
         }
 
-        console.log('✅ Found pending transaction:');
-        console.log('   Transaction ID:', transaction._id);
-        console.log('   Amount:', `$${transaction.amount}`);
-        console.log('   Status:', transaction.status);
-        console.log('   Created:', transaction.createdAt);
-
-        // Check if transaction is expired (30 minutes)
         const transactionDate = new Date(transaction.createdAt);
         const now = new Date();
         const timeDiffMinutes = (now - transactionDate) / 1000 / 60;
-        
-        console.log('   Age:', `${Math.floor(timeDiffMinutes)} minutes`);
 
         if (timeDiffMinutes > 30) {
-            console.log('❌ Transaction expired (over 30 minutes old)');
-            
             wallet.updateTransactionStatus(transactionId, 'failed', 'Payment request expired after 30 minutes');
             await wallet.save();
-            
             return res.json({
                 success: false,
                 message: 'Payment request expired. Please create a new payment request.',
-                data: {
-                    status: 'failed',
-                    reason: 'expired'
-                }
+                data: { status: 'failed', reason: 'expired' }
             });
         }
 
-        // Get Chime config
-        console.log('\n📥 Fetching Chime configuration...');
         const PaymentMethod = require('../models/PaymentMethod');
-        const paymentMethod = await PaymentMethod.findOne({
-            method: 'chime',
-            isActive: true
-        });
+        const paymentMethod = await PaymentMethod.findOne({ method: 'chime', isActive: true });
 
         if (!paymentMethod || !paymentMethod.chimeConfig) {
-            console.log('❌ Chime payment method not configured');
             return res.status(400).json({
                 success: false,
                 message: 'Chime payment method not configured. Please contact support.'
@@ -1557,19 +1516,11 @@ const verifyChimePayment = async (req, res) => {
         }
 
         const { mailTmUsername, mailTmPassword } = paymentMethod.chimeConfig;
-        
-        console.log('✅ Chime config loaded');
 
-        // Get user's Chime details
-        console.log('\n👤 Fetching user Chime details...');
         const UserChimeDetails = require('../models/UserChimeDetails');
-        const userChimeDetails = await UserChimeDetails.findOne({ 
-            userId,
-            isActive: true 
-        });
-        
+        const userChimeDetails = await UserChimeDetails.findOne({ userId, isActive: true });
+
         if (!userChimeDetails) {
-            console.log('❌ User Chime details not found');
             return res.status(400).json({
                 success: false,
                 message: 'User Chime details not found. Please setup your Chime account first.'
@@ -1577,25 +1528,14 @@ const verifyChimePayment = async (req, res) => {
         }
 
         const userFullName = userChimeDetails.fullName;
-        
-        console.log('✅ User Chime details:');
-        console.log('   Full Name:', userFullName);
 
-        // Login to Mail.tm
-        console.log('\n📧 Logging into Mail.tm...');
         const mailTmService = require('../services/mailTmService');
         await mailTmService.login(mailTmUsername, mailTmPassword);
-        console.log('✅ Mail.tm login successful');
 
-        // Search for payment emails
-        console.log('\n🔍 Searching for payment emails...');
         const chimeMessages = await mailTmService.searchChimePayments(transactionDate);
-
         console.log(`📬 Found ${chimeMessages.length} potential payment email(s)`);
 
         if (chimeMessages.length === 0) {
-            console.log('⏳ No payment emails found yet');
-            
             return res.json({
                 success: false,
                 message: 'Payment not verified yet. Please wait a few minutes after sending the payment.',
@@ -1610,59 +1550,61 @@ const verifyChimePayment = async (req, res) => {
             });
         }
 
-        // Parse and match payments with IMPROVED NAME MATCHING
-        console.log('\n💰 Parsing and matching payments...');
+        // ✅ Guard 1: messageIds already used by THIS wallet's completed transactions.
+        const usedMessageIds = new Set(
+            wallet.transactions
+                .filter(t => t.status === 'completed' && t.metadata?.messageId)
+                .map(t => t.metadata.messageId)
+        );
+
         let matchedPayment = null;
-        
+
         for (let i = 0; i < chimeMessages.length; i++) {
             const message = chimeMessages[i];
-            console.log(`\n   📨 Email ${i + 1}/${chimeMessages.length}:`);
-            console.log(`      Subject: "${message.subject}"`);
-            
-            const paymentDetails = await mailTmService.parseChimePayment(message.id);
-            
-            console.log(`\n   🔍 Matching criteria check:`);
-            
-            // 1. Amount match (within 1 cent tolerance)
-            const amountMatches = paymentDetails.amount && 
-                                 Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
-            
-            console.log(`      💵 Amount:`);
-            console.log(`         Email: $${paymentDetails.amount}`);
-            console.log(`         Expected: $${transaction.amount}`);
-            console.log(`         Match: ${amountMatches ? '✅' : '❌'}`);
-            
-            // 2. IMPROVED NAME MATCHING - Using helper function
-            const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
-            
-            console.log(`      👤 Name:`);
-            console.log(`         Email sender: "${paymentDetails.senderName}"`);
-            console.log(`         Expected: "${userFullName}"`);
-            console.log(`         Match: ${nameMatches ? '✅' : '❌'}`);
+            console.log(`\n   📨 Email ${i + 1}/${chimeMessages.length}: "${message.subject}"`);
 
-            // 3. Date match
+            if (usedMessageIds.has(message.id)) {
+                console.log('      ⏭️  Email already used for another deposit, skipping');
+                continue;
+            }
+
+            const paymentDetails = await mailTmService.parseChimePayment(message.id);
+
+            const amountMatches = paymentDetails.amount &&
+                Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
+            const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
             const emailDate = new Date(paymentDetails.date);
             const timeDiff = emailDate - transactionDate;
             const dateMatches = timeDiff > 0 && timeDiff <= 30 * 60 * 1000;
-            
-            console.log(`      📅 Date:`);
-            console.log(`         Time difference: ${Math.floor(timeDiff / 1000)} seconds`);
-            console.log(`         Match: ${dateMatches ? '✅' : '❌'}`);
 
-            // Check if all criteria match
+            console.log(`      💵 Amount: ${amountMatches ? '✅' : '❌'} (Email: $${paymentDetails.amount}, Expected: $${transaction.amount})`);
+            console.log(`      👤 Name: ${nameMatches ? '✅' : '❌'} (Email: "${paymentDetails.senderName}", Expected: "${userFullName}")`);
+            console.log(`      📅 Date: ${dateMatches ? '✅' : '❌'} (diff: ${Math.floor(timeDiff / 1000)}s)`);
+
             if (amountMatches && nameMatches && dateMatches) {
-                console.log(`\n      🎉 ALL CRITERIA MATCHED!`);
+                // ✅ Guard 2: cross-document backstop (manual + cron race).
+                const alreadyCredited = await Wallet.findOne({
+                    transactions: {
+                        $elemMatch: {
+                            'metadata.messageId': paymentDetails.messageId,
+                            status: 'completed'
+                        }
+                    }
+                });
+
+                if (alreadyCredited) {
+                    console.log('      🚫 messageId already credited elsewhere, skipping');
+                    usedMessageIds.add(paymentDetails.messageId);
+                    continue;
+                }
+
+                console.log('      🎉 ALL CRITERIA MATCHED!');
                 matchedPayment = paymentDetails;
                 break;
-            } else {
-                console.log(`\n      ❌ Not a match - continuing search...`);
             }
         }
 
         if (matchedPayment) {
-            console.log('\n✅ PAYMENT VERIFICATION SUCCESSFUL!');
-            
-            // Payment found - mark as completed
             const metadata = {
                 senderName: matchedPayment.senderName,
                 amount: matchedPayment.amount,
@@ -1674,42 +1616,37 @@ const verifyChimePayment = async (req, res) => {
                 verificationMethod: 'manual'
             };
 
-            // ✅ Use centralized helper for deposit completion with bonus
             const { completeDepositWithBonus } = require('../helpers/depositHelper');
-            
-            const result = await completeDepositWithBonus(
-                wallet._id,
-                transaction._id,
-                {
-                    completedBy: 'Chime Verification',
-                    isManual: true,
-                    metadata: metadata
+
+            let result;
+            try {
+                result = await completeDepositWithBonus(
+                    wallet._id,
+                    transaction._id,
+                    { completedBy: 'Chime Verification', isManual: true, metadata }
+                );
+            } catch (err) {
+                // ✅ Benign: another path already credited this email.
+                if (err.code === 'DUPLICATE_MESSAGE_ID') {
+                    return res.json({
+                        success: true,
+                        message: 'Payment already verified.',
+                        data: { transactionId: transaction._id, status: 'completed', duplicate: true }
+                    });
                 }
-            );
-            
-            // Update Chime-specific description
+                throw err;
+            }
+
             const updatedWallet = await Wallet.findById(wallet._id);
             const updatedTransaction = updatedWallet.transactions.id(transaction._id);
             updatedTransaction.description = `Chime deposit from ${matchedPayment.senderName} - Verified`;
             await updatedWallet.save();
 
-            console.log('\n💾 Transaction updated:');
-            console.log('   Status: completed');
-            console.log('   New wallet balance: $' + updatedWallet.balance);
-            console.log('   Available balance: $' + updatedWallet.availableBalance);
-            if (result.bonusInfo) {
-                console.log(`   🎁 Bonus applied: $${result.bonusInfo.amount}`);
-            }
-            
-            console.log('\n═══════════════════════════════════════════════════');
-            console.log('✅ VERIFY CHIME PAYMENT SUCCESS');
-            console.log('═══════════════════════════════════════════════════\n');
-
-            const successMessage = result.bonusInfo 
+            const successMessage = result.bonusInfo
                 ? `Payment verified successfully with ${result.bonusInfo.description} of $${result.bonusInfo.amount}! Your balance has been updated.`
                 : 'Payment verified successfully! Your balance has been updated.';
 
-            res.json({
+            return res.json({
                 success: true,
                 message: successMessage,
                 data: {
@@ -1723,17 +1660,8 @@ const verifyChimePayment = async (req, res) => {
                     bonusApplied: result.bonusInfo || null
                 }
             });
-
         } else {
-            console.log('\n⏳ PAYMENT NOT VERIFIED YET');
-            console.log(`   Checked ${chimeMessages.length} email(s)`);
-            console.log(`   No matching payment found`);
-            
-            console.log('\n═══════════════════════════════════════════════════');
-            console.log('⏳ VERIFY CHIME PAYMENT PENDING');
-            console.log('═══════════════════════════════════════════════════\n');
-            
-            res.json({
+            return res.json({
                 success: false,
                 message: 'Payment not verified yet. Please ensure you sent exactly the correct amount to the correct Chime tag, then wait a few minutes and try again.',
                 data: {
@@ -1750,14 +1678,7 @@ const verifyChimePayment = async (req, res) => {
         }
 
     } catch (error) {
-        console.error('\n❌❌❌ ERROR IN VERIFY CHIME PAYMENT');
-        console.error('Error name:', error.name);
-        console.error('Error message:', error.message);
-        console.error('Error stack:', error.stack);
-        console.log('═══════════════════════════════════════════════════');
-        console.log('❌ VERIFY CHIME PAYMENT FAILED');
-        console.log('═══════════════════════════════════════════════════\n');
-        
+        console.error('❌ ERROR IN VERIFY CHIME PAYMENT:', error.message);
         res.status(500).json({
             success: false,
             message: 'Failed to verify Chime payment. Please try again or contact support.',
@@ -1769,18 +1690,11 @@ const verifyChimePayment = async (req, res) => {
 // Complete autoVerifyChimePayments function for paymentController.js (Cron Job)
 
 const autoVerifyChimePayments = async () => {
-    console.log('\n🔄 ═══════════════════════════════════════════════════');
-    console.log('🔄 AUTO-VERIFY CHIME PAYMENTS CRON JOB START');
-    console.log('🔄 Time:', new Date().toISOString());
-    console.log('🔄 ═══════════════════════════════════════════════════');
-    
+    console.log('\n🔄 AUTO-VERIFY CHIME PAYMENTS CRON JOB START', new Date().toISOString());
+
     try {
-        // Find all wallets with pending Chime DEPOSIT transactions only
-        console.log('\n🔍 Searching for pending Chime deposit transactions...');
-        
         const Wallet = require('../models/Wallet');
 
-        // ✅ GUARD 1 - Query level: never fetch wallets with only withdrawals
         const walletsWithPending = await Wallet.find({
             'transactions': {
                 $elemMatch: {
@@ -1793,104 +1707,81 @@ const autoVerifyChimePayments = async () => {
 
         if (walletsWithPending.length === 0) {
             console.log('ℹ️  No pending Chime deposit transactions found');
-            console.log('🔄 ═══════════════════════════════════════════════════\n');
             return;
         }
 
-        console.log(`📊 Found ${walletsWithPending.length} wallet(s) with pending Chime deposit transactions`);
+        console.log(`📊 Found ${walletsWithPending.length} wallet(s) with pending Chime deposits`);
 
-        // Get admin's Chime config from database
-        console.log('\n📥 Fetching Chime configuration...');
         let chimeConfig;
         try {
             const PaymentMethod = require('../models/PaymentMethod');
             chimeConfig = await PaymentMethod.getConfig('chime');
         } catch (error) {
             console.error('❌ Chime payment method not configured:', error.message);
-            console.log('🔄 ═══════════════════════════════════════════════════\n');
             return;
         }
 
         if (!chimeConfig || !chimeConfig.mailTmUsername || !chimeConfig.mailTmPassword) {
             console.error('❌ Mail.tm credentials not configured for Chime');
-            console.log('🔄 ═══════════════════════════════════════════════════\n');
             return;
         }
 
-        console.log('✅ Chime config loaded');
-
-        // Login to Mail.tm once for all verifications
-        console.log('\n📧 Logging into Mail.tm...');
         const mailTmService = require('../services/mailTmService');
         await mailTmService.login(chimeConfig.mailTmUsername, chimeConfig.mailTmPassword);
-        console.log('✅ Mail.tm login successful');
 
         let verifiedCount = 0;
         let expiredCount = 0;
         let checkedCount = 0;
         let skippedCount = 0;
 
-        // Process each wallet
         for (const wallet of walletsWithPending) {
 
-            // ✅ GUARD 2 - Filter level: never touch withdrawals
             const pendingTransactions = wallet.transactions.filter(t =>
                 t.paymentMethod === 'chime' &&
                 t.status === 'pending' &&
                 t.type !== 'withdrawal'
             );
 
-            if (pendingTransactions.length === 0) {
-                console.log(`\n💼 Wallet ${wallet.userId} - no deposit transactions after filter, skipping`);
-                continue;
-            }
+            if (pendingTransactions.length === 0) continue;
 
-            console.log(`\n💼 ─────────────────────────────────────────────────`);
-            console.log(`💼 Wallet: ${wallet.userId}`);
-            console.log(`💼 Pending deposit transactions: ${pendingTransactions.length}`);
-            console.log(`💼 ─────────────────────────────────────────────────`);
+            console.log(`\n💼 Wallet: ${wallet.userId} — ${pendingTransactions.length} pending deposit(s)`);
+
+            // ✅ Guard 1 (per wallet): seeded from completed transactions, updated the
+            // instant each one settles so a 2nd pending request can't reuse the email.
+            const usedMessageIds = new Set(
+                wallet.transactions
+                    .filter(t => t.status === 'completed' && t.metadata?.messageId)
+                    .map(t => t.metadata.messageId)
+            );
 
             for (const transaction of pendingTransactions) {
                 checkedCount++;
-                
-                try {
-                    console.log(`\n  🔍 Transaction ${checkedCount}:`);
-                    console.log(`     ID: ${transaction._id}`);
-                    console.log(`     Type: ${transaction.type}`);
-                    console.log(`     Amount: $${transaction.amount}`);
-                    console.log(`     Created: ${transaction.createdAt}`);
 
-                    // ✅ GUARD 3 - Timer level: only expire deposits
+                try {
+                    console.log(`\n  🔍 Transaction ${checkedCount}: $${transaction.amount} (${transaction._id})`);
+
                     if (transaction.type !== 'deposit') {
                         console.log(`     ⏭️  Skipping - not a deposit (type: ${transaction.type})`);
                         skippedCount++;
                         continue;
                     }
 
-                    // Check if transaction is expired (30 minutes) - DEPOSITS ONLY
                     const transactionDate = new Date(transaction.createdAt);
                     const now = new Date();
                     const timeDiffMinutes = (now - transactionDate) / 1000 / 60;
-                    
-                    console.log(`     Age: ${Math.floor(timeDiffMinutes)} minutes`);
 
                     if (timeDiffMinutes > 30) {
-                        console.log('     ⏰ Deposit transaction EXPIRED (over 30 minutes)');
-                        
+                        console.log('     ⏰ Deposit EXPIRED (over 30 minutes)');
                         wallet.updateTransactionStatus(
                             transaction._id,
                             'failed',
                             'Chime deposit request expired after 30 minutes - Auto-verified'
                         );
-                        
                         await wallet.save();
                         expiredCount++;
-                        
-                        console.log('     ❌ Marked as failed due to expiration');
                         continue;
                     }
 
-                    // Get user's Chime details
                     const UserChimeDetails = require('../models/UserChimeDetails');
                     const userChimeDetails = await UserChimeDetails.findOne({
                         userId: wallet.userId,
@@ -1904,48 +1795,55 @@ const autoVerifyChimePayments = async () => {
                     }
 
                     const userFullName = userChimeDetails.fullName;
-                    
-                    console.log(`     👤 User: ${userFullName}`);
-
-                    // Search for payments after transaction creation
                     const chimeMessages = await mailTmService.searchChimePayments(transactionDate);
-
-                    console.log(`     📬 Found ${chimeMessages.length} potential matching email(s)`);
+                    console.log(`     📬 Found ${chimeMessages.length} potential email(s)`);
 
                     if (chimeMessages.length === 0) {
-                        console.log('     ⏳ No emails found yet - will retry next cycle');
+                        console.log('     ⏳ No emails found yet');
                         continue;
                     }
 
-                    // Match payment with IMPROVED NAME MATCHING
                     let matched = false;
-                    
+
                     for (let i = 0; i < chimeMessages.length; i++) {
                         const message = chimeMessages[i];
-                        console.log(`\n     📨 Checking email ${i + 1}/${chimeMessages.length}:`);
-                        console.log(`        Subject: "${message.subject}"`);
-                        
+
+                        if (usedMessageIds.has(message.id)) {
+                            console.log(`     ⏭️  Email ${i + 1} already used, skipping`);
+                            continue;
+                        }
+
                         const paymentDetails = await mailTmService.parseChimePayment(message.id);
 
-                        // 1. Amount match (within 1 cent tolerance)
                         const amountMatches = paymentDetails.amount &&
-                                            Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
-
-                        // 2. Name matching
+                            Math.abs(paymentDetails.amount - transaction.amount) < 0.01;
                         const nameMatches = matchChimeName(paymentDetails.senderName, userFullName);
-
-                        // 3. Date match (after transaction, within 30 minutes)
                         const emailDate = new Date(paymentDetails.date);
                         const timeDiff = emailDate - transactionDate;
                         const dateMatches = timeDiff > 0 && timeDiff <= 30 * 60 * 1000;
 
-                        console.log(`        💵 Amount: ${amountMatches ? '✅' : '❌'} (Email: $${paymentDetails.amount}, Expected: $${transaction.amount})`);
-                        console.log(`        👤 Name: ${nameMatches ? '✅' : '❌'} (Email: "${paymentDetails.senderName}", Expected: "${userFullName}")`);
-                        console.log(`        📅 Date: ${dateMatches ? '✅' : '❌'} (Time diff: ${Math.floor(timeDiff / 1000)}s)`);
+                        console.log(`     📨 Email ${i + 1}: amount ${amountMatches ? '✅' : '❌'}, name ${nameMatches ? '✅' : '❌'}, date ${dateMatches ? '✅' : '❌'}`);
 
                         if (amountMatches && nameMatches && dateMatches) {
+
+                            // ✅ Guard 2: cross-document backstop.
+                            const alreadyCredited = await Wallet.findOne({
+                                transactions: {
+                                    $elemMatch: {
+                                        'metadata.messageId': paymentDetails.messageId,
+                                        status: 'completed'
+                                    }
+                                }
+                            });
+
+                            if (alreadyCredited) {
+                                console.log('        🚫 messageId already credited elsewhere, skipping');
+                                usedMessageIds.add(paymentDetails.messageId);
+                                continue;
+                            }
+
                             console.log('        🎉 MATCH FOUND!');
-                            
+
                             const metadata = {
                                 senderName: paymentDetails.senderName,
                                 amount: paymentDetails.amount,
@@ -1958,72 +1856,59 @@ const autoVerifyChimePayments = async () => {
                                 autoVerified: true
                             };
 
-                            // ✅ Use centralized helper for deposit completion with bonus
                             const { completeDepositWithBonus } = require('../helpers/depositHelper');
-                            
-                            const result = await completeDepositWithBonus(
-                                wallet._id,
-                                transaction._id,
-                                {
-                                    completedBy: 'Chime Auto-Verify',
-                                    isManual: false,
-                                    metadata: metadata
+
+                            let result;
+                            try {
+                                result = await completeDepositWithBonus(
+                                    wallet._id,
+                                    transaction._id,
+                                    { completedBy: 'Chime Auto-Verify', isManual: false, metadata }
+                                );
+                            } catch (err) {
+                                if (err.code === 'DUPLICATE_MESSAGE_ID') {
+                                    console.log('        🚫 Duplicate completion prevented, skipping');
+                                    usedMessageIds.add(paymentDetails.messageId);
+                                    continue;
                                 }
-                            );
-                            
-                            // Update Chime-specific description
+                                throw err;
+                            }
+
+                            usedMessageIds.add(paymentDetails.messageId);
+
                             const updatedWallet = await Wallet.findById(wallet._id);
                             const updatedTransaction = updatedWallet.transactions.id(transaction._id);
                             updatedTransaction.description = `Chime deposit from ${paymentDetails.senderName} - Auto-verified`;
                             await updatedWallet.save();
-                            
+
                             verifiedCount++;
                             matched = true;
-                            
-                            console.log(`     ✅ Payment verified successfully!`);
-                            console.log(`     💰 New balance: $${updatedWallet.balance}`);
-                            console.log(`     💳 Available balance: $${updatedWallet.availableBalance}`);
-                            if (result.bonusInfo) {
-                                console.log(`     🎁 Bonus applied: $${result.bonusInfo.amount}`);
-                            }
-                            
+
+                            console.log(`     ✅ Verified! New balance: $${updatedWallet.balance}`);
+                            if (result.bonusInfo) console.log(`     🎁 Bonus: $${result.bonusInfo.amount}`);
+
                             break;
-                        } else {
-                            console.log('        ❌ No match - continuing...');
                         }
                     }
 
-                    if (!matched) {
-                        console.log('     ⏳ No matching payment found yet');
-                    }
+                    if (!matched) console.log('     ⏳ No matching payment found yet');
 
                 } catch (error) {
-                    console.error(`     ❌ Error verifying transaction ${transaction._id}:`);
-                    console.error(`        ${error.message}`);
+                    console.error(`     ❌ Error verifying transaction ${transaction._id}: ${error.message}`);
                 }
             }
         }
 
-        // Summary
-        console.log('\n📊 ═══════════════════════════════════════════════════');
-        console.log('📊 AUTO-VERIFY SUMMARY:');
-        console.log(`   ✅ Verified: ${verifiedCount} deposit(s)`);
-        console.log(`   ⏰ Expired: ${expiredCount} deposit(s)`);
-        console.log(`   ⏳ Still pending: ${checkedCount - verifiedCount - expiredCount} deposit(s)`);
-        console.log(`   ⚠️  Skipped: ${skippedCount} transaction(s)`);
-        console.log(`   📝 Total checked: ${checkedCount} transaction(s)`);
-        console.log('📊 ═══════════════════════════════════════════════════');
-        console.log('🔄 AUTO-VERIFY CHIME PAYMENTS CRON JOB COMPLETE');
-        console.log('🔄 ═══════════════════════════════════════════════════\n');
+        console.log('\n📊 AUTO-VERIFY SUMMARY:');
+        console.log(`   ✅ Verified: ${verifiedCount}`);
+        console.log(`   ⏰ Expired: ${expiredCount}`);
+        console.log(`   ⏳ Still pending: ${checkedCount - verifiedCount - expiredCount}`);
+        console.log(`   ⚠️  Skipped: ${skippedCount}`);
+        console.log(`   📝 Total checked: ${checkedCount}`);
+        console.log('🔄 AUTO-VERIFY CHIME PAYMENTS CRON JOB COMPLETE\n');
 
     } catch (error) {
-        console.error('\n❌❌❌ ERROR IN AUTO-VERIFY CRON JOB');
-        console.error('Error name:', error.name);
-        console.error('Error message:', error.message);
-        console.error('Error stack:', error.stack);
-        console.log('🔄 ═══════════════════════════════════════════════════');
-        console.log('❌ AUTO-VERIFY CHIME PAYMENTS CRON JOB FAILED');
-        console.log('🔄 ═══════════════════════════════════════════════════\n');
+        console.error('❌ ERROR IN AUTO-VERIFY CRON JOB:', error.message);
     }
 };
 

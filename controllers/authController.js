@@ -825,6 +825,200 @@ const updateProfile = async (req, res) => {
     });
   }
 };
+// ========================================
+// SEND PASSWORD RESET OTP
+// ========================================
+const sendPasswordResetOTP = async (req, res) => {
+  const { email } = req.body;
+
+  if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Valid email is required'
+    });
+  }
+
+  const lowercaseEmail = email.toLowerCase().trim();
+  const clientIP = getClientIP(req);
+
+  try {
+    // ✅ Unlike registration, the email MUST exist for a reset.
+    const user = await User.findOne({ 'profile.email': lowercaseEmail });
+
+    // ✅ SECURITY: do NOT reveal whether the email exists. Always return the
+    // same success response. Only actually send an email if the user is real.
+    if (!user) {
+      console.log(`ℹ️  Password reset requested for non-existent email: ${lowercaseEmail}`);
+      return res.status(200).json({
+        success: true,
+        message: 'If an account exists with this email, a reset code has been sent.'
+      });
+    }
+
+    // Rate limit (same pattern as sendOTP)
+    const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+    const recentOTPs = await OTP.countDocuments({
+      email: lowercaseEmail,
+      purpose: 'password_reset',
+      createdAt: { $gte: oneMinuteAgo }
+    });
+
+    const maxRequestsPerMinute = parseInt(process.env.OTP_RATE_LIMIT_MAX_REQUESTS) || 3;
+    if (recentOTPs >= maxRequestsPerMinute) {
+      return res.status(429).json({
+        success: false,
+        message: 'Too many reset requests. Please wait a minute and try again.'
+      });
+    }
+
+    await OTP.cleanupOldOTPs(lowercaseEmail, 'password_reset');
+
+    const otpCode = OTP.generateOTP();
+    const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 10;
+    const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
+
+    const newOTP = await OTP.create({
+      email: lowercaseEmail,
+      otp: otpCode,
+      purpose: 'password_reset',
+      expiresAt,
+      metadata: {
+        ipAddress: clientIP,
+        userAgent: req.get('User-Agent')
+      }
+    });
+
+    try {
+      await emailService.sendOTP(lowercaseEmail, otpCode, 'password_reset');
+    } catch (emailError) {
+      console.error('Error sending password reset email:', emailError);
+      await OTP.findByIdAndDelete(newOTP._id);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send reset email. Please try again.'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'If an account exists with this email, a reset code has been sent.',
+      data: { email: lowercaseEmail, expiresIn: expiryMinutes }
+    });
+
+  } catch (error) {
+    console.error('Error sending password reset OTP:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error sending reset code',
+      error: error.message
+    });
+  }
+};
+
+// ========================================
+// RESET PASSWORD (after OTP verified)
+// ========================================
+const resetPassword = async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+
+  if (!email || !otp || !newPassword) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email, verification code, and new password are required'
+    });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({
+      success: false,
+      message: 'New password must be at least 6 characters'
+    });
+  }
+
+  const lowercaseEmail = email.toLowerCase().trim();
+
+  try {
+    // ✅ Re-verify the OTP here rather than trusting a prior verify call.
+    // This makes the endpoint safe even if called directly. We require the
+    // code to match AND still be unexpired. We do NOT require verified=true,
+    // because this single call does verification + reset atomically.
+    const otpRecord = await OTP.findOne({
+      email: lowercaseEmail,
+      purpose: 'password_reset'
+    }).sort({ createdAt: -1 });
+
+    if (!otpRecord) {
+      return res.status(404).json({
+        success: false,
+        message: 'No reset request found. Please request a new code.'
+      });
+    }
+
+    if (otpRecord.isExpired()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reset code has expired. Please request a new one.'
+      });
+    }
+
+    if (otpRecord.hasExceededAttempts()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Maximum attempts exceeded. Please request a new code.'
+      });
+    }
+
+    otpRecord.attempts += 1;
+    await otpRecord.save();
+
+    if (otpRecord.otp !== otp) {
+      const remaining = otpRecord.maxAttempts - otpRecord.attempts;
+      return res.status(400).json({
+        success: false,
+        message: `Invalid code. ${remaining} attempt(s) remaining.`
+      });
+    }
+
+    const user = await User.findOne({ 'profile.email': lowercaseEmail });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // ✅ Prevent reusing the current password
+    const sameAsOld = await bcrypt.compare(newPassword, user.password);
+    if (sameAsOld) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from your current password'
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    user.password = hashedPassword;
+    await user.save();
+
+    // ✅ Invalidate the OTP so it can't be reused
+    await OTP.findByIdAndDelete(otpRecord._id);
+
+    console.log(`✅ Password reset successful for: ${lowercaseEmail}`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successfully! You can now sign in with your new password.'
+    });
+
+  } catch (error) {
+    console.error('Error resetting password:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error resetting password',
+      error: error.message
+    });
+  }
+};
 
 module.exports = {
   sendOTP,
@@ -834,5 +1028,7 @@ module.exports = {
   changePassword,
   changePin,
   getCurrentUser,
-  updateProfile
+  updateProfile,
+  sendPasswordResetOTP, // ✅ NEW
+  resetPassword 
 };
